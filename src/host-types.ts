@@ -380,17 +380,17 @@ export type ResolvedRoleReference = Readonly<{
 export type ModuleContextRoot = Readonly<{
   owningModuleUri: string;
   owningModulePath: string;
-  physicalAncestors: readonly Readonly<{
-    owningModuleUri: string;
-    owningModulePath: string;
-  }>[];
-  physicalDepth: number;
 }>;
 
 export type ResolvedModuleNode = ModuleContextRoot & Readonly<{
   kind: 'record' | 'ref';
   declaringModuleUri: string;
   declaringModulePath: string;
+  physicalAncestors: readonly Readonly<{
+    owningModuleUri: string;
+    owningModulePath: string;
+  }>[];
+  physicalDepth: number;
   typeName: string;
   recordType: ModuleType;
   ruleSet: ModuleRuleSet;
