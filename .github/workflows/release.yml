@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'LICENSE'
+      - '*.md'
+      # NOTE: '*.md' only matches root-level files (README.md), so
+      # .changeset/*.md still triggers this workflow for version PR creation.
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    name: Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+
+    steps:
+      # Mint a short-lived installation token from the enbox-release-bot App
+      # (installed org-wide). Pushes/PRs made with the App identity trigger
+      # `ci.yml` normally on version PRs. Actions are pinned to commit SHAs.
+      - name: Generate GitHub App token
+        id: app-token
+        if: ${{ secrets.RELEASE_APP_CLIENT_ID != '' && secrets.RELEASE_APP_PRIVATE_KEY != '' }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          token: ${{ steps.app-token.outputs.token || github.token }}
+          fetch-depth: 0
+
+      - name: Check release readiness
+        id: readiness
+        env:
+          HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
+          HAS_APP_TOKEN: ${{ steps.app-token.outputs.token != '' }}
+        run: |
+          shopt -s nullglob
+          files=(.changeset/*.md)
+          count=0
+          for f in "${files[@]}"; do
+            [ "$f" != ".changeset/README.md" ] && count=$((count + 1))
+          done
+          if [ "$HAS_APP_TOKEN" != "true" ]; then
+            echo "Skipping release until RELEASE_APP_CLIENT_ID and RELEASE_APP_PRIVATE_KEY are configured."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          elif [ "$count" -eq 0 ] && [ "$HAS_NPM_TOKEN" != "true" ]; then
+            echo "No pending changesets and NPM_TOKEN is not set yet; re-run Release via workflow_dispatch after adding NPM_TOKEN."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Bun
+        if: steps.readiness.outputs.ready == 'true'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+
+      - name: Setup Node.js
+        if: steps.readiness.outputs.ready == 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .node-version
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        if: steps.readiness.outputs.ready == 'true'
+        run: bun install --frozen-lockfile
+
+      - name: Create Release PR or Publish
+        if: steps.readiness.outputs.ready == 'true'
+        id: changesets
+        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1.9.0
+        with:
+          publish: bun run release
+          version: bun run version
+          commit: 'chore: version packages'
+          title: 'chore: version packages'
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: 'true'
