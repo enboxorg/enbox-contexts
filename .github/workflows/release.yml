@@ -48,8 +48,6 @@ jobs:
 
       - name: Check release readiness
         id: readiness
-        env:
-          HAS_APP_TOKEN: ${{ steps.app-token.outputs.token != '' }}
         run: |
           shopt -s nullglob
           files=(.changeset/*.md)
@@ -57,10 +55,7 @@ jobs:
           for f in "${files[@]}"; do
             [ "$f" != ".changeset/README.md" ] && count=$((count + 1))
           done
-          if [ "$HAS_APP_TOKEN" != "true" ]; then
-            echo "Skipping release until RELEASE_APP_CLIENT_ID and RELEASE_APP_PRIVATE_KEY are configured."
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-          elif [ "$count" -eq 0 ] && [ "$HAS_NPM_TOKEN" != "true" ]; then
+          if [ "$count" -eq 0 ] && [ "$HAS_NPM_TOKEN" != "true" ]; then
             echo "No pending changesets and NPM_TOKEN is not set yet; re-run Release via workflow_dispatch after adding NPM_TOKEN."
             echo "ready=false" >> "$GITHUB_OUTPUT"
           else
@@ -94,7 +89,7 @@ jobs:
           commit: 'chore: version packages'
           title: 'chore: version packages'
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: 'true'
