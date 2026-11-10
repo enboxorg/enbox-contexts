@@ -17,7 +17,7 @@ export type SavedContextFollow = Readonly<{
 /** Immutable state of one module's local context catalog. */
 export type ContextViewState<Context> = Readonly<{
   contexts: readonly Context[];
-  /** Current saved follows in key order; these coordinates alone do not establish access. */
+  /** Current saved follow entries in key order; a saved entry alone does not establish access. */
   savedFollows: readonly SavedContextFollow[];
 }> & Readonly<
   | { status: 'loading'; error?: never }

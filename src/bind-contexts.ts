@@ -360,7 +360,7 @@ function createContextsInstance<
           ? new Set<string>()
           : new Set(initialScope.allowedPaths);
 
-        const projection = new FollowedModuleLease({
+        const moduleLease = new FollowedModuleLease({
           root: rootLease,
           module: consumerModule.definition.module,
           source,
@@ -422,14 +422,14 @@ function createContextsInstance<
           },
         });
 
-        bindingSignal = projection.signal;
+        bindingSignal = moduleLease.signal;
         innerRecords = consumerTyped.scope({
           allowedPaths: () => permittedPaths,
           contextId,
           contextPath: attachmentPath,
-          execution: projection.executionContext(),
+          execution: moduleLease.executionContext(),
           prepare: async (): Promise<void> => {
-            await projection.assertActive();
+            await moduleLease.assertActive();
           },
           signal: bindingSignal,
         }) as unknown as ContextModuleBinding['records'];

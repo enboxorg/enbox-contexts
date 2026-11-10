@@ -147,7 +147,7 @@ export function isContextInvitationEnvelope(value: unknown): value is ContextInv
   return Object.values(value.preview).every(entry => typeof entry === 'string');
 }
 
-/** Validate stored intent coordinates before resolving its module context root. */
+/** Validate a stored follow journal record before resolving its context root. */
 export function isContextFollowIntent(value: unknown): value is ContextFollowIntent {
   return isPlainObject(value)
     && isValidDidUri(value.ownerDid)

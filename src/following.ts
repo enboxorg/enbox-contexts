@@ -73,7 +73,7 @@ export class ContextFollowing {
   private readonly _options: ContextFollowingOptions;
   private readonly _pendingOperations = new Map<string, Promise<unknown>>();
   private readonly _latestIntentRecords = new Map<string, ContextFollowRecord>();
-  private readonly _projectionReconciliations = new Map<string, Promise<void>>();
+  private readonly _moduleReconciliations = new Map<string, Promise<void>>();
   private _observation?: Observation;
 
   public constructor(options: ContextFollowingOptions) {
@@ -311,7 +311,7 @@ export class ContextFollowing {
       return;
     }
     const key = JSON.stringify([source.id, source.acceptanceId, modules]);
-    if (this._projectionReconciliations.has(key)) {
+    if (this._moduleReconciliations.has(key)) {
       return;
     }
     const pending = this._options.sync
@@ -328,9 +328,9 @@ export class ContextFollowing {
         },
       )
       .finally((): void => {
-        this._projectionReconciliations.delete(key);
+        this._moduleReconciliations.delete(key);
       });
-    this._projectionReconciliations.set(key, pending);
+    this._moduleReconciliations.set(key, pending);
   }
 
   private async saveFollowUnlessNewerForget(
