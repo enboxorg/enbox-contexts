@@ -292,8 +292,16 @@ function formatMicrosecondTimestamp(totalMicros: bigint): string {
   return `${iso.slice(0, -1)}${String(subMillisMicros).padStart(3, '0')}Z`;
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** Lexicographic UTF-16 code-unit comparator matching deterministic DWN key ordering. */
+export function compareCodeUnits(left: string, right: string): number {
+  if (left < right) {
+    return -1;
+  }
+  return left > right ? 1 : 0;
 }
 
 export function isTypedModuleLike(value: unknown): value is TypedModule<ModuleDefinition> {

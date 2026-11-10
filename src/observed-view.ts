@@ -238,12 +238,15 @@ export abstract class ObservedView<
 
   protected publish(next: State): void {
     const unchanged = this.statesEqual(this._state, next);
-    this._state = next;
+    if (!unchanged || this._state.status !== next.status) {
+      this._state = next;
+    }
     if (next.status === 'ready') {
+      const readyState = this._state as Extract<State, { status: 'ready' }>;
       for (const waiter of [...this._waiters]) {
         this._waiters.delete(waiter);
         waiter.cleanup();
-        waiter.resolve(next as Extract<State, { status: 'ready' }>);
+        waiter.resolve(readyState);
       }
     } else if (next.status === 'error') {
       this.settleWaitersWithRejection(next.error);

@@ -11,9 +11,10 @@ import type {
   SyncEvent,
 } from './host-types.js';
 
-import { isValidContextId, moduleContextKey } from './companion-module.js';
+import { compareCodeUnits, isValidContextId, moduleContextKey } from './companion-module.js';
 import { ContextRetiredError, isFollowedSourceNotReadyError } from './errors.js';
 import { followedSyncSourceActiveEqual, syncEventCoversModule } from './lease.js';
+import { combineAbortSignals } from './observed-view.js';
 
 export type ContextFollowRecord = Readonly<{
   id: string;
@@ -67,7 +68,7 @@ type Observation = {
 
 /**
  * Shared per-(enbox, companionModule) coordinator that serializes journal reads/writes
- * across `bindContexts` and all `.withModules()` handles (#22).
+ * across `bindContexts` and all `.withModules()` handles.
  */
 export class ContextFollowing {
   private readonly _options: ContextFollowingOptions;
@@ -85,12 +86,7 @@ export class ContextFollowing {
       .flatMap(([key, { value }]): SavedContextFollow[] =>
         value.following ? [{ key, id: value.contextId, ownerDid: value.ownerDid, path: value.path }] : [],
       )
-      .sort((left, right): number => {
-        if (left.key < right.key) {
-          return -1;
-        }
-        return left.key > right.key ? 1 : 0;
-      });
+      .sort((left, right): number => compareCodeUnits(left.key, right.key));
   }
 
   public follow(
@@ -397,9 +393,7 @@ export class ContextFollowing {
       requested: false,
     };
     this._observation = observation;
-    const signal = this._options.signal === undefined
-      ? observation.controller.signal
-      : AbortSignal.any([observation.controller.signal, this._options.signal]);
+    const signal = combineAbortSignals(observation.controller.signal, this._options.signal)!;
     observation.opening = Promise.resolve().then(async (): Promise<void> => {
       const view = await this._options.openView(signal);
       if (!this.isObserving(observation)) {

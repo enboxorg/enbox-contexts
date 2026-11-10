@@ -41,11 +41,13 @@ import type {
 import type { ProjectionViewGeneration } from './projected-record-view.js';
 
 import {
+  compareCodeUnits,
   CONTEXT_FOLLOW_PATH,
   CONTEXT_INVITATION_PATH,
   currentTimestamp,
   isCanonicalModulePath,
   isContextCompanionModule,
+  isPlainObject,
   isTypedModuleLike,
   isValidContextId,
   isValidDidUri,
@@ -180,14 +182,22 @@ function createContextsInstance<
     }
   };
 
+  const contextModulesByPath = new Map<string, readonly string[]>();
   const contextModulesAt = (path: string): readonly string[] => {
-    const root = rootGraph.nodesByDeclaredPath.get(path);
-    if (root?.kind !== 'record') {
-      return [];
+    const cached = contextModulesByPath.get(path);
+    if (cached !== undefined) {
+      return cached;
     }
-    return Object.values(selectedModules)
-      .filter(module => hasContextModuleAttachment(enbox.modules.resolveGraph(module), root))
-      .map(module => module.definition.module);
+    const root = rootGraph.nodesByDeclaredPath.get(path);
+    const modules = root?.kind === 'record'
+      ? Object.freeze(
+        Object.values(selectedModules)
+          .filter(module => hasContextModuleAttachment(enbox.modules.resolveGraph(module), root))
+          .map(module => module.definition.module),
+      )
+      : Object.freeze([]);
+    contextModulesByPath.set(path, modules);
+    return modules;
   };
 
   const canUseFollowing = enbox.agent.sync !== undefined;
@@ -778,7 +788,7 @@ function createContextsInstance<
 
   const withModules = (modules: Readonly<Record<string, TypedModule>>): ContextsApi<D, C> => {
     enbox.signal.throwIfAborted();
-    if (modules === null || typeof modules !== 'object' || Array.isArray(modules)) {
+    if (!isPlainObject(modules)) {
       throw new TypeError('ContextsApi.withModules requires a named map of typed consumer modules.');
     }
     const merged = Object.freeze({ ...selectedModules, ...modules });
@@ -1438,7 +1448,7 @@ function normalizeInvitationPreview(preview: ContextInvitationPreview | undefine
   if (preview === undefined) {
     return Object.freeze({});
   }
-  if (preview === null || typeof preview !== 'object' || Array.isArray(preview)) {
+  if (!isPlainObject(preview)) {
     throw new TypeError('OwnedContext.invite: preview must be a plain string record.');
   }
   const normalized: Record<string, string> = {};
@@ -1462,15 +1472,7 @@ function normalizeInvitationLimit(limit: number | undefined): number {
 }
 
 function contextRootRecordId(contextId: string): string {
-  const segments = contextId.split('/');
-  return segments[segments.length - 1]!;
-}
-
-function compareCodeUnits(left: string, right: string): number {
-  if (left < right) {
-    return -1;
-  }
-  return left > right ? 1 : 0;
+  return contextId.slice(contextId.lastIndexOf('/') + 1);
 }
 
 function compareModuleContexts(
@@ -1490,5 +1492,5 @@ function compareRecordsNewestFirst(
   if (left.timestamp !== right.timestamp) {
     return left.timestamp > right.timestamp ? -1 : 1;
   }
-  return left.id > right.id ? -1 : left.id < right.id ? 1 : 0;
+  return compareCodeUnits(right.id, left.id);
 }
