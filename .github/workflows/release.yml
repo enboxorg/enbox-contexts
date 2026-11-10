@@ -23,6 +23,10 @@ jobs:
       contents: write
       pull-requests: write
       id-token: write
+    env:
+      HAS_APP_ID: ${{ secrets.RELEASE_APP_CLIENT_ID != '' }}
+      HAS_APP_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' }}
+      HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
 
     steps:
       # Mint a short-lived installation token from the enbox-release-bot App
@@ -30,7 +34,7 @@ jobs:
       # `ci.yml` normally on version PRs. Actions are pinned to commit SHAs.
       - name: Generate GitHub App token
         id: app-token
-        if: ${{ secrets.RELEASE_APP_CLIENT_ID != '' && secrets.RELEASE_APP_PRIVATE_KEY != '' }}
+        if: env.HAS_APP_ID == 'true' && env.HAS_APP_KEY == 'true'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
@@ -45,7 +49,6 @@ jobs:
       - name: Check release readiness
         id: readiness
         env:
-          HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
           HAS_APP_TOKEN: ${{ steps.app-token.outputs.token != '' }}
         run: |
           shopt -s nullglob
