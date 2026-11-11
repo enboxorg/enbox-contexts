@@ -64,7 +64,7 @@ import {
 } from './errors.js';
 import { ContextFollowing } from './following.js';
 import { FollowedModuleLease, followedSyncSourceActiveEqual } from './lease.js';
-import { ObservedView, openView, whileSignalsActive } from './observed-view.js';
+import { ObservedView, openView, toRecordViewErrorState, whileSignalsActive } from './observed-view.js';
 import { createProjectedRecordView } from './projected-record-view.js';
 
 const DEFAULT_INVITATION_LIMIT = 100;
@@ -322,7 +322,6 @@ function createContextsInstance<
       let bindingSignal = contextSignal;
 
       if (source === undefined) {
-        // Validate allowedPaths before triggering ensureReady(path).
         innerRecords = consumerTyped.scope({
           allowedPaths: staticConsumerPaths,
           contextId,
@@ -438,7 +437,6 @@ function createContextsInstance<
 
       let publicRecords = innerRecords;
       if (source !== undefined) {
-        // Validate path, pagination.limit, and within upfront before opening ProjectedRecordView.
         const observe = (async (
           rawPath: string,
           request: ContextObserveRequest<ModuleDefinition, string>,
@@ -1344,14 +1342,14 @@ class MappedRecordView<Raw, Projected> extends ObservedView<RecordViewState<Proj
       }
     } catch (error: unknown) {
       if (this.canPublishMaterialization(generation)) {
-        this.publishError(error instanceof Error ? error : new Error(String(error)));
+        this.publishError(error);
       }
     }
   }
 
   protected handleLifetimeAbort(reason: unknown, sessionEnded: boolean): void {
     if (sessionEnded) {
-      this.publishError(reason instanceof Error ? reason : new Error(String(reason)));
+      this.publishError(reason);
     }
   }
 
@@ -1367,15 +1365,8 @@ class MappedRecordView<Raw, Projected> extends ObservedView<RecordViewState<Proj
     }
   }
 
-  private publishError(error: Error): void {
-    const previous = this.getSnapshot();
-    this.publish(Object.freeze({
-      status: 'error',
-      current: false,
-      hasMore: previous.hasMore,
-      records: previous.records,
-      error,
-    }));
+  private publishError(cause: unknown): void {
+    this.publish(toRecordViewErrorState(this.getSnapshot(), cause));
   }
 }
 

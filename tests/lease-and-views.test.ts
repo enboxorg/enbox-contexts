@@ -155,8 +155,8 @@ function makeInnerView<T>(initialRecords: readonly T[]): {
   };
 }
 
-describe('FollowedModuleLease & ProjectedRecordView fixes', () => {
-  it('retires a consumer lease when affectedModules changes mid-capture (#27)', async () => {
+describe('FollowedModuleLease & ProjectedRecordView', () => {
+  it('retires a consumer lease when affectedModules changes mid-capture', async () => {
     const source = makeSource();
     const fakeSync = createFakeSync(source);
     const session = new AbortController();
@@ -204,7 +204,7 @@ describe('FollowedModuleLease & ProjectedRecordView fixes', () => {
     await expect(pendingAssert).rejects.toBeInstanceOf(ContextRetiredError);
   });
 
-  it('rejects refresh() with ContextNotReadyError instead of hanging when consumer stays unavailable (#20)', async () => {
+  it('rejects refresh() with ContextNotReadyError instead of hanging when consumer stays unavailable', async () => {
     const unavailableSource = makeSource({
       modules: {
         [ROOT_URI]: {
@@ -245,7 +245,7 @@ describe('FollowedModuleLease & ProjectedRecordView fixes', () => {
     await expect(projected.refresh()).rejects.toThrow('closed');
   });
 
-  it('closes ProjectedRecordView permanently when root authority retires (#21) and rotates generations on consumer recovery', async () => {
+  it('closes ProjectedRecordView permanently when root authority retires and rotates generations on consumer recovery', async () => {
     const source = makeSource({
       modules: {
         [ROOT_URI]: {

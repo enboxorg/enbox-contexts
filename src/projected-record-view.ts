@@ -3,7 +3,7 @@ import type { FollowedModuleLease } from './lease.js';
 
 import { syncEventCoversModule } from './lease.js';
 import { ContextNotReadyError, isContextNotReadyError, isContextRetiredError } from './errors.js';
-import { combineAbortSignals, ObservedView, openView, whileSignalsActive } from './observed-view.js';
+import { combineAbortSignals, ObservedView, openView, toRecordViewErrorState, whileSignalsActive } from './observed-view.js';
 
 export type ProjectionViewGeneration<Item> = {
   open(signal: AbortSignal): Promise<ExpandableRecordView<Item>>;
@@ -261,11 +261,11 @@ class ProjectedRecordView<Item> extends ObservedView<RecordViewState<Item>> impl
     ) {
       return;
     }
-    if (event.type === 'followed-context:change') {
-      if (event.module !== source.rootModule && !(event.affectedModules?.includes(module) ?? false)) {
-        return;
-      }
-    } else if (!syncEventCoversModule(event, module) && event.module !== source.rootModule) {
+    const coversModule = event.module === source.rootModule
+      || (event.type === 'followed-context:change'
+        ? (event.affectedModules?.includes(module) ?? false)
+        : syncEventCoversModule(event, module));
+    if (!coversModule) {
       return;
     }
     if (this._inner === undefined) {
@@ -274,13 +274,6 @@ class ProjectedRecordView<Item> extends ObservedView<RecordViewState<Item>> impl
   }
 
   private fail(cause: unknown): void {
-    const state = this.getSnapshot();
-    this.publish(Object.freeze({
-      status: 'error',
-      current: false,
-      hasMore: state.hasMore,
-      records: state.records,
-      error: cause instanceof Error ? cause : new Error(String(cause)),
-    }));
+    this.publish(toRecordViewErrorState(this.getSnapshot(), cause));
   }
 }

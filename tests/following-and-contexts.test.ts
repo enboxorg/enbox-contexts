@@ -119,7 +119,13 @@ const RealtimeModule = makeModule(
 
 const NotebookContextsModule = defineContextModule(NotebookModule);
 
+const testGraphs = new WeakMap<TypedModule, ResolvedModuleGraph>();
+
 function buildTestGraph(mod: TypedModule): ResolvedModuleGraph {
+  const cached = testGraphs.get(mod);
+  if (cached !== undefined) {
+    return cached;
+  }
   const nodes = new Map<string, ResolvedModuleNode>();
   const uri = mod.definition.module;
   const walk = (
@@ -174,7 +180,7 @@ function buildTestGraph(mod: TypedModule): ResolvedModuleGraph {
     }
   };
   walk(mod.definition.structure, '', []);
-  return {
+  const graph: ResolvedModuleGraph = {
     rootModuleUri: uri,
     nodesByDeclaredPath: nodes,
     resolveInvokedRole: (rolePath: string) => {
@@ -192,6 +198,8 @@ function buildTestGraph(mod: TypedModule): ResolvedModuleGraph {
       };
     },
   };
+  testGraphs.set(mod, graph);
+  return graph;
 }
 
 type StoredRow = {
@@ -654,7 +662,7 @@ function createTestEnboxHost(connectedDid: string): {
 }
 
 describe('bindContexts & ContextFollowing end-to-end contracts', () => {
-  it('shares one ContextFollowing coordinator across base and withModules() handles (#22) while keeping withModules() inert', async () => {
+  it('shares one ContextFollowing coordinator across base and withModules() handles while keeping withModules() inert', async () => {
     const host = createTestEnboxHost(MEMBER_DID);
     const baseContexts = bindContexts(host.enbox, NotebookContextsModule);
     const extendedContexts = baseContexts.withModules({ realtime: RealtimeModule });
@@ -677,7 +685,7 @@ describe('bindContexts & ContextFollowing end-to-end contracts', () => {
     expect(host.ensureModulesCalls.some(call => call.modules.includes(RealtimeModule.definition.module))).toBe(true);
   });
 
-  it('validates owned consumer paths BEFORE ensureReady (#23), manages members, and delivers/accepts companion invitations', async () => {
+  it('validates owned consumer paths BEFORE ensureReady, manages members, and delivers/accepts companion invitations', async () => {
     const ownerHost = createTestEnboxHost(OWNER_DID);
     const ownerContexts = bindContexts(ownerHost.enbox, NotebookContextsModule).withModules({
       realtime: RealtimeModule,
@@ -687,7 +695,7 @@ describe('bindContexts & ContextFollowing end-to-end contracts', () => {
     const ownedRealtime = ownedPage.using(RealtimeModule);
 
     ownerHost.ensureReadyCalls.length = 0;
-    // Fix #23: invalid path throws TypeError BEFORE calling consumer ensureReady!
+    // Invalid path throws TypeError BEFORE calling consumer ensureReady!
     await expect(
       (ownedRealtime.records.read as (path: string, id: string) => Promise<unknown>)('page/nonexistent', 'r1'),
     ).rejects.toThrow(TypeError);
@@ -745,7 +753,7 @@ describe('bindContexts & ContextFollowing end-to-end contracts', () => {
     expect(await memberContexts.list()).toEqual([]);
   });
 
-  it('handles viewer role with zero consumer read paths (#12), upfront observe validation (#11), and onCapture error classification (#24)', async () => {
+  it('handles viewer role with zero consumer read paths, upfront observe validation, and onCapture error classification', async () => {
     const memberHost = createTestEnboxHost(MEMBER_DID);
     const viewerSource: FollowedSyncSource = {
       id: 'viewer-role-1',
@@ -775,12 +783,12 @@ describe('bindContexts & ContextFollowing end-to-end contracts', () => {
     const shared = catalog[0]!;
     expect(shared.access).toBe('member');
 
-    // Fix #12: using(RealtimeModule) does NOT crash synchronously with TypeError even though `viewer` has 0 readable paths in RealtimeModule!
+    // using(RealtimeModule) does NOT crash synchronously with TypeError even though `viewer` has 0 readable paths in RealtimeModule!
     const realtime = shared.using(RealtimeModule);
     expect(realtime.path).toBe('page');
     await expect(realtime.records.read('page/live', 'rec-1')).rejects.toBeInstanceOf(ContextNotReadyError);
 
-    // Fix #11: async observe validates path, pagination.limit, and within upfront before opening ProjectedRecordView
+    // Async observe validates path, pagination.limit, and within upfront before opening ProjectedRecordView
     await expect(
       (realtime.records.observe as (p: string, r: unknown) => Promise<unknown>)('page/bad', { pagination: { limit: 1 } }),
     ).rejects.toThrow(TypeError);
@@ -791,7 +799,7 @@ describe('bindContexts & ContextFollowing end-to-end contracts', () => {
       realtime.records.observe('page/live', { pagination: { limit: 1 }, within: 'other/ctx' }),
     ).rejects.toThrow('cannot escape their context');
 
-    // Fix #24: FollowedSourceNotReadyError in resolveFollowedSourceModuleGraph wraps as ContextNotReadyError,
+    // FollowedSourceNotReadyError in resolveFollowedSourceModuleGraph wraps as ContextNotReadyError,
     // while attachment path mismatch throws terminal Error (not ContextNotReadyError).
     const memberSourceWithScope: FollowedSyncSource = {
       ...viewerSource,

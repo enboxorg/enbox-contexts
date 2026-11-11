@@ -1,7 +1,20 @@
+import type { RecordViewState } from './host-types.js';
+
 /** Minimal external-store contract compatible with `useSyncExternalStore` and `@enbox/api`. */
 export interface ObservableStore<State> {
   getSnapshot: () => State;
   subscribe: (listener: (snapshot: State) => void) => () => void;
+}
+
+/** Freeze a terminal `RecordViewState` error snapshot while preserving previously loaded records. */
+export function toRecordViewErrorState<T>(previous: RecordViewState<T>, cause: unknown): RecordViewState<T> {
+  return Object.freeze({
+    status: 'error',
+    current: false,
+    hasMore: previous.hasMore,
+    records: previous.records,
+    error: cause instanceof Error ? cause : new Error(String(cause)),
+  });
 }
 
 /** Combine defined abort signals without allocating when zero or one signal is present. */
