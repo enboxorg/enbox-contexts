@@ -3,7 +3,6 @@ import type { SavedContextFollow } from './context-view.js';
 import type {
   ContextFollowTarget,
   ContextRecord,
-  EnboxModulesHost,
   ExpandableRecordView,
   FollowedSyncSource,
   ResolvedModuleGraph,
@@ -20,6 +19,7 @@ import {
 } from './companion-module.js';
 import { ContextRetiredError, isFollowedSourceNotReadyError } from './errors.js';
 import { followedSyncSourceActiveEqual, syncEventCoversModule } from './lease.js';
+import { resolveModuleContextRoles } from './module-scope.js';
 import { combineAbortSignals } from './observed-view.js';
 
 export type ContextFollowRecord = Readonly<{
@@ -39,7 +39,6 @@ export type ContextFollowingOptions = {
   companionModuleUri: string;
   rootModuleUri: string;
   rootGraph: ResolvedModuleGraph;
-  modulesHost: Pick<EnboxModulesHost, 'resolveContextRoles'>;
   append(intent: ContextFollowIntent, after?: string): Promise<ContextFollowRecord>;
   openView(signal: AbortSignal): Promise<ExpandableRecordView<ContextRecord<ContextFollowIntent>>>;
   decodeRecord(record: ContextRecord<ContextFollowIntent>): Promise<ContextFollowRecord | undefined>;
@@ -594,7 +593,7 @@ export class ContextFollowing {
     if (!isValidContextId(contextId) || node.physicalDepth !== contextId.split('/').length) {
       throw new TypeError(`ContextFollowing: context ID does not identify a '${path}' root.`);
     }
-    const roles = this._options.modulesHost.resolveContextRoles(this._options.rootGraph, path);
+    const roles = resolveModuleContextRoles(this._options.rootGraph, path);
     if (roles.length === 0) {
       throw new TypeError(`ContextFollowing: '${path}' is not a shared context root.`);
     }

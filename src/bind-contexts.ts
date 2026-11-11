@@ -65,6 +65,12 @@ import {
 } from './errors.js';
 import { ContextFollowing } from './following.js';
 import { FollowedModuleLease, followedSyncSourceActiveEqual } from './lease.js';
+import {
+  recordRepresentationsEqual,
+  resolveModuleContextRoles,
+  resolveModuleContextRoot,
+  resolveModuleRoleScope,
+} from './module-scope.js';
 import { ObservedView, openView, toRecordViewErrorState, whileSignalsActive } from './observed-view.js';
 import { createProjectedRecordView } from './projected-record-view.js';
 
@@ -166,14 +172,14 @@ function createContextsInstance<
   const contextRoots = [...rootGraph.nodesByDeclaredPath.values()]
     .filter(node => node.kind === 'record' && node.ruleSet.$role !== true && node.owningModuleUri === rootModuleUri)
     .map(node => node.declaringModulePath)
-    .filter(path => getContextRoles(enbox, rootGraph, path).length > 0);
+    .filter(path => getContextRoles(rootGraph, path).length > 0);
 
   const hasContextModuleAttachment = (consumerGraph: ResolvedModuleGraph, root: ResolvedModuleNode): boolean => {
     if (root.kind !== 'record' || root.ruleSet.$role === true || root.owningModuleUri !== rootModuleUri) {
       return false;
     }
     try {
-      enbox.modules.resolveContextRoot(consumerGraph, root);
+      resolveModuleContextRoot(consumerGraph, root);
       return true;
     } catch (error: unknown) {
       if (error instanceof TypeError) {
@@ -202,7 +208,7 @@ function createContextsInstance<
     const modules = root?.kind === 'record'
       ? Object.freeze(
         Object.values(selectedModules)
-          .filter(module => hasContextModuleAttachment(enbox.modules.resolveGraph(module), root))
+          .filter(module => hasContextModuleAttachment(enbox.using(module).graph, root))
           .map(module => module.definition.module),
       )
       : Object.freeze([]);
@@ -243,7 +249,6 @@ function createContextsInstance<
       companionModuleUri,
       rootModuleUri,
       rootGraph,
-      modulesHost: enbox.modules,
       signal: enbox.signal,
       sync,
       append: async (intent: ContextFollowIntent, after?: string): Promise<ContextFollowRecord> => {
@@ -321,11 +326,11 @@ function createContextsInstance<
         return existing;
       }
 
-      const consumerGraph = enbox.modules.resolveGraph(consumerModule);
-      const rootNode = resolveRecordNode(rootGraph, rootPath);
-      const attachment = enbox.modules.resolveContextRoot(consumerGraph, rootNode);
-      const attachmentPath = attachment.declaringModulePath;
       const consumerTyped = enbox.using(consumerModule);
+      const consumerGraph = consumerTyped.graph;
+      const rootNode = resolveRecordNode(rootGraph, rootPath);
+      const attachment = resolveModuleContextRoot(consumerGraph, rootNode);
+      const attachmentPath = attachment.declaringModulePath;
       const staticConsumerPaths = collectSubtreeRecordPaths(consumerGraph, attachmentPath, false);
 
       let innerRecords: ContextModuleBinding['records'];
@@ -359,7 +364,7 @@ function createContextsInstance<
         // and operations reject with ContextNotReadyError unless the role/scope changes.
         let initialScope: ResolvedModuleRoleScope | undefined;
         try {
-          initialScope = enbox.modules.resolveRoleScope(consumerGraph, rootRoleRef);
+          initialScope = resolveModuleRoleScope(consumerGraph, rootRoleRef);
         } catch (error: unknown) {
           if (!(error instanceof TypeError)) {
             throw error;
@@ -408,7 +413,7 @@ function createContextsInstance<
                 new Error(`Role '${accepted.moduleRole}' has no readable paths in '${consumerModule.definition.module}'.`),
               );
             }
-            const actualScope = enbox.modules.resolveRoleScope(actualGraph, rootRoleRef);
+            const actualScope = resolveModuleRoleScope(actualGraph, rootRoleRef);
             const actualAllowed = new Set(actualScope.allowedPaths);
             const acceptedPaths = new Set(accepted.modulePaths);
             const readable = new Set(actualScope.readablePaths);
@@ -421,7 +426,7 @@ function createContextsInstance<
               if (
                 actualNode?.kind !== 'record'
                 || expectedNode?.kind !== 'record'
-                || !enbox.modules.representationsEqual(expectedNode, actualNode)
+                || !recordRepresentationsEqual(expectedNode, actualNode)
               ) {
                 throw new Error(
                   `Context.using: owner module '${consumerModule.definition.module}' changed the consumed representation at '${path}'.`,
@@ -511,7 +516,7 @@ function createContextsInstance<
       return existing as unknown as OwnedContext<D, C, Root>;
     }
     const allowedPaths = collectSubtreeRecordPaths(rootGraph, path, true);
-    const roles = getContextRoles(enbox, rootGraph, path);
+    const roles = getContextRoles(rootGraph, path);
     const base = {
       access: 'owner' as const,
       id,
@@ -563,7 +568,7 @@ function createContextsInstance<
       throw new Error('ContextsApi requires an Enbox session with sync storage.');
     }
     const rootScope = source.modules[source.rootModule]!;
-    const scope = enbox.modules.resolveRoleScope(rootGraph, rootGraph.resolveInvokedRole(rootScope.moduleRole));
+    const scope = resolveModuleRoleScope(rootGraph, rootGraph.resolveInvokedRole(rootScope.moduleRole));
     const replicatedPaths = new Set(rootScope.modulePaths);
     const readablePaths = new Set(scope.readablePaths);
     const allowedPaths = new Set(
@@ -701,7 +706,7 @@ function createContextsInstance<
     enbox.signal.throwIfAborted();
     const path = normalizePath(rawPath);
     const target = normalizeFollowTarget(request, 'ContextsApi.follow');
-    if (getContextRoles(enbox, rootGraph, path).length === 0) {
+    if (getContextRoles(rootGraph, path).length === 0) {
       throw new TypeError(`ContextsApi.follow: '${path}' is not a shared context root.`);
     }
     let source: FollowedSyncSource;
@@ -792,11 +797,11 @@ function createContextsInstance<
       if (!isTypedModuleLike(candidate)) {
         throw new TypeError(`ContextsApi.withModules: '${name}' is not a TypedModule.`);
       }
-      const graph = enbox.modules.resolveGraph(candidate);
       if (candidate.definition.module === rootModuleUri || uris.has(candidate.definition.module)) {
         throw new TypeError('ContextsApi.withModules requires distinct consumer module URIs.');
       }
       uris.add(candidate.definition.module);
+      const graph = enbox.using(candidate).graph;
       if (!attachesToAnyRoot(graph)) {
         throw new TypeError(
           `ContextsApi.withModules: '${candidate.definition.module}' does not attach to an owned root of '${rootModuleUri}'.`,
@@ -868,7 +873,7 @@ function createContextsInstance<
       const rootNode = rootGraph.nodesByDeclaredPath.get(envelope.path);
       if (
         rootNode?.kind !== 'record'
-        || getContextRoles(enbox, rootGraph, envelope.path).length === 0
+        || getContextRoles(rootGraph, envelope.path).length === 0
         || !isValidContextId(envelope.contextId)
         || envelope.contextId.split('/').length !== rootNode.physicalDepth
       ) {
@@ -1396,7 +1401,6 @@ function collectSubtreeRecordPaths(
 }
 
 function getContextRoles(
-  enbox: EnboxHost,
   rootGraph: ResolvedModuleGraph,
   path: string,
 ): readonly string[] {
@@ -1409,7 +1413,7 @@ function getContextRoles(
   ) {
     return [];
   }
-  return enbox.modules.resolveContextRoles(rootGraph, path);
+  return resolveModuleContextRoles(rootGraph, path);
 }
 
 function resolveRecordNode(graph: ResolvedModuleGraph, path: string): ResolvedModuleNode {

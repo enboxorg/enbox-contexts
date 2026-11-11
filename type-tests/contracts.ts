@@ -5,6 +5,7 @@ import type {
   ContextRootPath,
   EnboxHost,
   ModuleAttachmentPaths,
+  ModuleContextAttachmentPath,
   ModuleDefinition,
   RecordCodec,
   TypedModule,
@@ -135,6 +136,9 @@ export type _AttachmentPath = Expect<
 >;
 export type _UnattachedIsNever = Expect<
   Equal<ModuleAttachmentPaths<typeof RealtimeExtension, 'https://example.com/modules/notebooks/v1', 'notebook'>, never>
+>;
+export type _DescendantContextAttachment = Expect<
+  Equal<ModuleContextAttachmentPath<typeof RealtimeExtension, 'https://example.com/modules/notebooks/v1', 'notebook'>, 'page'>
 >;
 
 // Fix #9: Widened Root = string preserves concrete descendant paths rather than collapsing to `never`.
