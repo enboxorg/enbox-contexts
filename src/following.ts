@@ -11,7 +11,7 @@ import type {
   SyncEvent,
 } from './host-types.js';
 
-import { compareCodeUnits, isValidContextId, moduleContextKey } from './companion-module.js';
+import { compareCodeUnits, equalArrays, isValidContextId, moduleContextKey } from './companion-module.js';
 import { ContextRetiredError, isFollowedSourceNotReadyError } from './errors.js';
 import { followedSyncSourceActiveEqual, syncEventCoversModule } from './lease.js';
 import { combineAbortSignals } from './observed-view.js';
@@ -498,7 +498,7 @@ export class ContextFollowing {
     }
     const selectedModules = this.collectModules(intent.path, additionalModules);
     const sources = await this.listAcceptedContextSources(intent);
-    const existing = sources.find((source): boolean => sameRoles(source.roles, roles));
+    const existing = sources.find((source): boolean => equalArrays(source.roles, roles));
     if (existing !== undefined) {
       this.reconcileAdditionalModules(existing, selectedModules);
     } else {
@@ -652,10 +652,6 @@ export class ContextFollowing {
 
 function sameRecord(left: ContextFollowRecord | undefined, right: ContextFollowRecord | undefined): boolean {
   return left?.id === right?.id;
-}
-
-function sameRoles(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((role, index): boolean => role === right[index]);
 }
 
 function matchesContextSubtree(eventContextId: string, targetContextId: string): boolean {

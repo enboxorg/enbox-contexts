@@ -1,6 +1,7 @@
 import type { RecordView, RecordViewState } from './host-types.js';
 import type { ObservableStore } from './observed-view.js';
 
+import { equalArrays } from './companion-module.js';
 import { ObservedView, openView } from './observed-view.js';
 
 const MEMBER_ROOT_OPEN_CONCURRENCY = 4;
@@ -336,8 +337,7 @@ function immutableState<Context>(state: ContextViewState<Context>): ContextViewS
 function statesEqual<Context>(a: ContextViewState<Context>, b: ContextViewState<Context>): boolean {
   return a.status === b.status
     && a.error === b.error
-    && a.contexts.length === b.contexts.length
-    && a.contexts.every((context, index) => context === b.contexts[index])
+    && equalArrays(a.contexts, b.contexts)
     && a.savedFollows.length === b.savedFollows.length
     && a.savedFollows.every((follow, index) => {
       const other = b.savedFollows[index]!;

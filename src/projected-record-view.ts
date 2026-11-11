@@ -54,7 +54,7 @@ class ProjectedRecordView<Item> extends ObservedView<RecordViewState<Item>> impl
   }
 
   public async refresh(): Promise<Extract<RecordViewState<Item>, { status: 'ready' }>> {
-    // Fix #20: reject immediately on closed views, preserve terminal errors unless reopened,
+    // Reject immediately on closed views, preserve terminal errors unless reopened,
     // and never hang indefinitely when the optional consumer remains unavailable.
     if (this.isClosed) {
       return this.ready();
@@ -126,7 +126,7 @@ class ProjectedRecordView<Item> extends ObservedView<RecordViewState<Item>> impl
     }
   }
 
-  /** Fix #21: close the projected view permanently when root authority is retired or session ends. */
+  /** Close the projected view permanently when root authority is retired or session ends. */
   private async verifyRootBeforeOpening(): Promise<boolean> {
     try {
       await whileSignalsActive(

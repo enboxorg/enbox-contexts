@@ -304,6 +304,10 @@ export function compareCodeUnits(left: string, right: string): number {
   return left > right ? 1 : 0;
 }
 
+export function equalArrays<T>(left: readonly T[], right: readonly T[]): boolean {
+  return left.length === right.length && left.every((item, index) => item === right[index]);
+}
+
 export function isTypedModuleLike(value: unknown): value is TypedModule<ModuleDefinition> {
   return isPlainObject(value)
     && isPlainObject(value.definition)

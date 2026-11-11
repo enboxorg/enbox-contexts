@@ -9,6 +9,7 @@ import type {
 
 import { combineAbortSignals, whileSignalsActive } from './observed-view.js';
 import { ContextNotReadyError, ContextRetiredError, isContextNotReadyError } from './errors.js';
+import { equalArrays } from './companion-module.js';
 
 export type FollowedModuleLeaseOptions = {
   module: string;
@@ -31,8 +32,7 @@ export function followedModuleScopeEqual(
   }
   return left.contextPath === right.contextPath
     && left.moduleRole === right.moduleRole
-    && left.modulePaths.length === right.modulePaths.length
-    && left.modulePaths.every((path, index) => path === right.modulePaths[index]);
+    && equalArrays(left.modulePaths, right.modulePaths);
 }
 
 export function followedSyncSourceActiveEqual(
@@ -71,6 +71,7 @@ export class FollowedModuleLease {
   private readonly _controller = new AbortController();
   private _scope?: FollowedModuleScope;
   private _capturing?: Promise<void>;
+  private _verifyingScope?: Promise<void>;
   private _unsubscribe?: () => void;
 
   public constructor(private readonly _options: FollowedModuleLeaseOptions) {
@@ -202,7 +203,7 @@ export class FollowedModuleLease {
         this.retire();
         return;
       }
-      // Retire both already-captured and mid-capture leases when the consumer scope changes (#27).
+      // Retire both already-captured and mid-capture leases when the consumer scope changes.
       if ((this._scope !== undefined || this._capturing !== undefined) && event.affectedModules?.includes(module)) {
         this.retire();
         return;
@@ -211,7 +212,11 @@ export class FollowedModuleLease {
       return;
     }
     if (this._scope !== undefined) {
-      void this.assertScope().catch((): void => {});
+      this._verifyingScope ??= this.assertScope()
+        .then((): void => {}, (): void => {})
+        .finally((): void => {
+          this._verifyingScope = undefined;
+        });
     }
   }
 

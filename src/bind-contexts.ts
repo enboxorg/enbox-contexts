@@ -165,7 +165,7 @@ function createContextsInstance<
   const contextRoots = [...rootGraph.nodesByDeclaredPath.values()]
     .filter(node => node.kind === 'record' && node.ruleSet.$role !== true && node.owningModuleUri === rootModuleUri)
     .map(node => node.declaringModulePath)
-    .filter(path => getContextRoles(enbox, rootGraph, rootModule.definition, path).length > 0);
+    .filter(path => getContextRoles(enbox, rootGraph, path).length > 0);
 
   const hasContextModuleAttachment = (consumerGraph: ResolvedModuleGraph, root: ResolvedModuleNode): boolean => {
     if (root.kind !== 'record' || root.ruleSet.$role === true || root.owningModuleUri !== rootModuleUri) {
@@ -316,22 +316,13 @@ function createContextsInstance<
       const attachment = enbox.modules.resolveContextRoot(consumerGraph, rootNode);
       const attachmentPath = attachment.declaringModulePath;
       const consumerTyped = enbox.using(consumerModule);
-      const staticConsumerPaths = new Set(
-        [...consumerGraph.nodesByDeclaredPath.values()]
-          .filter(
-            node =>
-              node.kind === 'record'
-              && node.declaringModulePath.startsWith(`${attachmentPath}/`)
-              && node.ruleSet.$role !== true,
-          )
-          .map(node => node.declaringModulePath),
-      );
+      const staticConsumerPaths = collectSubtreeRecordPaths(consumerGraph, attachmentPath, false);
 
       let innerRecords: ContextModuleBinding['records'];
       let bindingSignal = contextSignal;
 
       if (source === undefined) {
-        // Fix #23: validate allowedPaths BEFORE triggering ensureReady(path).
+        // Validate allowedPaths before triggering ensureReady(path).
         innerRecords = consumerTyped.scope({
           allowedPaths: staticConsumerPaths,
           contextId,
@@ -354,7 +345,7 @@ function createContextsInstance<
       } else {
         const sync = enbox.agent.sync!;
         const rootRoleRef = rootGraph.resolveInvokedRole(source.modules[source.rootModule]!.moduleRole);
-        // Fix #12: if the member's root role grants zero readable paths in this optional consumer,
+        // If the member's root role grants zero readable paths in this optional consumer,
         // resolveRoleScope throws TypeError; treat permittedPaths as empty so using() stays inert
         // and operations reject with ContextNotReadyError unless the role/scope changes.
         let initialScope: ResolvedModuleRoleScope | undefined;
@@ -365,7 +356,7 @@ function createContextsInstance<
             throw error;
           }
         }
-        // Fix #25: immutable reference swap via getter instead of mutating a shared Set in place.
+        // Immutable reference swap via getter instead of mutating a shared Set in place.
         let permittedPaths: ReadonlySet<string> = initialScope === undefined
           ? new Set<string>()
           : new Set(initialScope.allowedPaths);
@@ -377,7 +368,7 @@ function createContextsInstance<
           signal: contextSignal,
           sync,
           onCapture: async (accepted, verifiedSource): Promise<void> => {
-            // Fix #24: attachment mismatch is a terminal contract mismatch, not transient readiness.
+            // Attachment mismatch is a terminal contract mismatch, not transient readiness.
             if (accepted.contextPath !== attachmentPath) {
               throw new Error('Context.using: verified consumer attachment path differs from the typed context binding.');
             }
@@ -447,7 +438,7 @@ function createContextsInstance<
 
       let publicRecords = innerRecords;
       if (source !== undefined) {
-        // Fix #11: async observe validates path, pagination.limit, and within upfront before opening ProjectedRecordView.
+        // Validate path, pagination.limit, and within upfront before opening ProjectedRecordView.
         const observe = (async (
           rawPath: string,
           request: ContextObserveRequest<ModuleDefinition, string>,
@@ -511,17 +502,8 @@ function createContextsInstance<
     if (existing !== undefined && existing.path === path) {
       return existing as unknown as OwnedContext<D, C, Root>;
     }
-    const allowedPaths = new Set(
-      [...rootGraph.nodesByDeclaredPath.values()]
-        .filter(
-          node =>
-            node.kind === 'record'
-            && node.ruleSet.$role !== true
-            && (node.declaringModulePath === path || node.declaringModulePath.startsWith(`${path}/`)),
-        )
-        .map(node => node.declaringModulePath),
-    );
-    const roles = getContextRoles(enbox, rootGraph, rootModule.definition, path);
+    const allowedPaths = collectSubtreeRecordPaths(rootGraph, path, true);
+    const roles = getContextRoles(enbox, rootGraph, path);
     const base = {
       access: 'owner' as const,
       id,
@@ -711,7 +693,7 @@ function createContextsInstance<
     enbox.signal.throwIfAborted();
     const path = normalizePath(rawPath);
     const target = normalizeFollowTarget(request, 'ContextsApi.follow');
-    if (getContextRoles(enbox, rootGraph, rootModule.definition, path).length === 0) {
+    if (getContextRoles(enbox, rootGraph, path).length === 0) {
       throw new TypeError(`ContextsApi.follow: '${path}' is not a shared context root.`);
     }
     let source: FollowedSyncSource;
@@ -842,31 +824,43 @@ function createContextsInstance<
       selected: ContextRecord<ContextInvitationEnvelope>;
     };
     const candidates = new Map<string, Candidate>();
-    for (const record of records) {
-      if (
-        record.recipient !== enbox.connectedDid
-        || record.module !== companionModuleUri
-        || record.modulePath !== CONTEXT_INVITATION_PATH
-      ) {
-        continue;
-      }
-      const ownerDid = record.creator.trim();
-      if (!isValidDidUri(ownerDid)) {
-        continue;
-      }
-      let envelope: ContextInvitationEnvelope;
-      try {
-        envelope = await record.value();
-      } catch (error: unknown) {
-        if (isRecordValidationError(error)) {
-          continue;
+    const decoded = await Promise.all(
+      records.map(async (record): Promise<{
+        envelope: ContextInvitationEnvelope;
+        ownerDid: string;
+        record: ContextRecord<ContextInvitationEnvelope>;
+      } | undefined> => {
+        if (
+          record.recipient !== enbox.connectedDid
+          || record.module !== companionModuleUri
+          || record.modulePath !== CONTEXT_INVITATION_PATH
+        ) {
+          return undefined;
         }
-        throw error;
+        const ownerDid = record.creator.trim();
+        if (!isValidDidUri(ownerDid)) {
+          return undefined;
+        }
+        try {
+          const envelope = await record.value();
+          return { envelope, ownerDid, record };
+        } catch (error: unknown) {
+          if (isRecordValidationError(error)) {
+            return undefined;
+          }
+          throw error;
+        }
+      }),
+    );
+    for (const item of decoded) {
+      if (item === undefined) {
+        continue;
       }
+      const { envelope, ownerDid, record } = item;
       const rootNode = rootGraph.nodesByDeclaredPath.get(envelope.path);
       if (
         rootNode?.kind !== 'record'
-        || getContextRoles(enbox, rootGraph, rootModule.definition, envelope.path).length === 0
+        || getContextRoles(enbox, rootGraph, envelope.path).length === 0
         || !isValidContextId(envelope.contextId)
         || envelope.contextId.split('/').length !== rootNode.physicalDepth
       ) {
@@ -1385,19 +1379,35 @@ class MappedRecordView<Raw, Projected> extends ObservedView<RecordViewState<Proj
   }
 }
 
+function collectSubtreeRecordPaths(
+  graph: ResolvedModuleGraph,
+  rootPath: string,
+  includeRoot: boolean,
+): Set<string> {
+  const prefix = `${rootPath}/`;
+  return new Set(
+    [...graph.nodesByDeclaredPath.values()]
+      .filter(
+        node =>
+          node.kind === 'record'
+          && node.ruleSet.$role !== true
+          && ((includeRoot && node.declaringModulePath === rootPath) || node.declaringModulePath.startsWith(prefix)),
+      )
+      .map(node => node.declaringModulePath),
+  );
+}
+
 function getContextRoles(
   enbox: EnboxHost,
   rootGraph: ResolvedModuleGraph,
-  definition: ModuleDefinition,
   path: string,
 ): readonly string[] {
   const rootSegment = path.split('/')[0]!;
-  const rootRuleSet = definition.structure[rootSegment];
   const node = rootGraph.nodesByDeclaredPath.get(path);
   if (
     node?.kind !== 'record'
     || node.ruleSet.$role === true
-    || typeof rootRuleSet?.$ref === 'string'
+    || rootGraph.nodesByDeclaredPath.get(rootSegment)?.kind === 'ref'
   ) {
     return [];
   }

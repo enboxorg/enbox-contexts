@@ -667,7 +667,7 @@ type ContextRecordPaths<
   ModuleRolePaths<D>
 >;
 
-/** Fix #9: preserve concrete module paths when `Root` is widened to `string`. */
+/** Preserve concrete module paths when `Root` is widened to `string`. */
 type ContextDescendantPaths<
   D extends ModuleDefinition,
   Root extends string,
