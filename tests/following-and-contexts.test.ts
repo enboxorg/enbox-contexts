@@ -26,16 +26,7 @@ import {
   ContextNotReadyError,
   defineContextModule,
 } from '../src/index.js';
-
-function jsonCodec<T>(): RecordCodec<T> {
-  return {
-    encode: value => ({
-      data: new Blob([JSON.stringify(value)], { type: 'application/json' }),
-      dataFormat: 'application/json',
-    }),
-    decode: async data => (await data.json()) as T,
-  };
-}
+import { jsonCodec } from './test-helpers.js';
 
 function makeModule<
   const D extends ModuleDefinition,

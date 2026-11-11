@@ -304,6 +304,17 @@ export function compareCodeUnits(left: string, right: string): number {
   return left > right ? 1 : 0;
 }
 
+/** Order records newest-first by timestamp, breaking ties by record ID descending. */
+export function compareRecordsNewestFirst(
+  left: { id: string; timestamp: string },
+  right: { id: string; timestamp: string },
+): number {
+  if (left.timestamp !== right.timestamp) {
+    return left.timestamp > right.timestamp ? -1 : 1;
+  }
+  return compareCodeUnits(right.id, left.id);
+}
+
 export function equalArrays<T>(left: readonly T[], right: readonly T[]): boolean {
   return left.length === right.length && left.every((item, index) => item === right[index]);
 }

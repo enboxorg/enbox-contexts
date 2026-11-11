@@ -111,7 +111,7 @@ class ProjectedRecordView<Item> extends ObservedView<RecordViewState<Item>> impl
 
   protected handleLifetimeAbort(reason: unknown, sessionEnded: boolean): void {
     if (sessionEnded) {
-      this.fail(reason);
+      this.publishError(reason);
     }
   }
 
@@ -135,7 +135,7 @@ class ProjectedRecordView<Item> extends ObservedView<RecordViewState<Item>> impl
       );
     } catch (error: unknown) {
       if (!this.isClosed) {
-        this.fail(error);
+        this.publishError(error);
         if (this._sessionSignal?.aborted || isContextRetiredError(error)) {
           void this.close().catch((): void => {});
         }
@@ -166,7 +166,7 @@ class ProjectedRecordView<Item> extends ObservedView<RecordViewState<Item>> impl
         if (this.isClosed || this._activeGen !== current) {
           return;
         }
-        this.fail(new ContextNotReadyError(generation.signal.reason));
+        this.publishError(new ContextNotReadyError(generation.signal.reason));
         this.clearGeneration();
         this.requestMaterialization();
       };
@@ -213,7 +213,7 @@ class ProjectedRecordView<Item> extends ObservedView<RecordViewState<Item>> impl
         return;
       }
       if (!isContextNotReadyError(error)) {
-        this.fail(error);
+        this.publishError(error);
       }
       this.clearGeneration();
       if (this._sessionSignal?.aborted || isContextRetiredError(error)) {
@@ -273,7 +273,7 @@ class ProjectedRecordView<Item> extends ObservedView<RecordViewState<Item>> impl
     }
   }
 
-  private fail(cause: unknown): void {
+  private publishError(cause: unknown): void {
     this.publish(toRecordViewErrorState(this.getSnapshot(), cause));
   }
 }

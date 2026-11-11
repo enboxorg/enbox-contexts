@@ -42,6 +42,7 @@ import type { ProjectionViewGeneration } from './projected-record-view.js';
 
 import {
   compareCodeUnits,
+  compareRecordsNewestFirst,
   CONTEXT_FOLLOW_PATH,
   CONTEXT_INVITATION_PATH,
   currentTimestamp,
@@ -180,6 +181,15 @@ function createContextsInstance<
       }
       throw error;
     }
+  };
+
+  const attachesToAnyRoot = (consumerGraph: ResolvedModuleGraph): boolean => {
+    for (const root of rootGraph.nodesByDeclaredPath.values()) {
+      if (hasContextModuleAttachment(consumerGraph, root)) {
+        return true;
+      }
+    }
+    return false;
   };
 
   const contextModulesByPath = new Map<string, readonly string[]>();
@@ -787,7 +797,7 @@ function createContextsInstance<
         throw new TypeError('ContextsApi.withModules requires distinct consumer module URIs.');
       }
       uris.add(candidate.definition.module);
-      if (![...rootGraph.nodesByDeclaredPath.values()].some(root => hasContextModuleAttachment(graph, root))) {
+      if (!attachesToAnyRoot(graph)) {
         throw new TypeError(
           `ContextsApi.withModules: '${candidate.definition.module}' does not attach to an owned root of '${rootModuleUri}'.`,
         );
@@ -1060,10 +1070,7 @@ function createMembersApi<
     if (precedence !== 0) {
       return precedence < 0 ? candidate : current;
     }
-    if (candidate.record.timestamp !== current.record.timestamp) {
-      return candidate.record.timestamp > current.record.timestamp ? candidate : current;
-    }
-    return candidate.record.id > current.record.id ? candidate : current;
+    return compareRecordsNewestFirst(candidate.record, current.record) < 0 ? candidate : current;
   };
 
   const preferred = (candidates: readonly ActiveMemberRecord[]): ActiveMemberRecord | undefined =>
@@ -1484,14 +1491,4 @@ function compareModuleContexts(
     return left.access === 'owner' ? -1 : 1;
   }
   return compareCodeUnits(left.key, right.key);
-}
-
-function compareRecordsNewestFirst(
-  left: { id: string; timestamp: string },
-  right: { id: string; timestamp: string },
-): number {
-  if (left.timestamp !== right.timestamp) {
-    return left.timestamp > right.timestamp ? -1 : 1;
-  }
-  return compareCodeUnits(right.id, left.id);
 }

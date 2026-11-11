@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { ModuleDefinition, RecordCodec, RecordDataReader, TypedModule } from '../src/index.js';
+import type { ModuleDefinition, RecordDataReader, TypedModule } from '../src/index.js';
 import {
   CONTEXT_FOLLOW_PATH,
   CONTEXT_INVITATION_PATH,
@@ -12,16 +12,7 @@ import {
   moduleContextKey,
   timestampAfter,
 } from '../src/index.js';
-
-function jsonCodec<T>(): RecordCodec<T> {
-  return {
-    encode: value => ({
-      data: new Blob([JSON.stringify(value)], { type: 'application/json' }),
-      dataFormat: 'application/json',
-    }),
-    decode: async data => (await data.json()) as T,
-  };
-}
+import { jsonCodec } from './test-helpers.js';
 
 function makeRecordData(rawJson: string): RecordDataReader {
   const stream = async (): Promise<ReadableStream> => new ReadableStream();

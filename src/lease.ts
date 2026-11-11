@@ -27,7 +27,7 @@ export function followedModuleScopeEqual(
   if (left === right) {
     return true;
   }
-  if (left === null || left === undefined || right === null || right === undefined) {
+  if (left == null || right == null) {
     return false;
   }
   return left.contextPath === right.contextPath

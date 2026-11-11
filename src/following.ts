@@ -11,7 +11,13 @@ import type {
   SyncEvent,
 } from './host-types.js';
 
-import { compareCodeUnits, equalArrays, isValidContextId, moduleContextKey } from './companion-module.js';
+import {
+  compareCodeUnits,
+  compareRecordsNewestFirst,
+  equalArrays,
+  isValidContextId,
+  moduleContextKey,
+} from './companion-module.js';
 import { ContextRetiredError, isFollowedSourceNotReadyError } from './errors.js';
 import { followedSyncSourceActiveEqual, syncEventCoversModule } from './lease.js';
 import { combineAbortSignals } from './observed-view.js';
@@ -201,12 +207,13 @@ export class ContextFollowing {
     let matched = false;
     for (const [key, record] of this._latestIntentRecords) {
       if (
-        record.value.ownerDid === event.tenantDid
-        && (event.contextId === undefined || matchesContextSubtree(event.contextId, record.value.contextId))
+        record.value.ownerDid !== event.tenantDid
+        || (event.contextId !== undefined && !matchesContextSubtree(event.contextId, record.value.contextId))
       ) {
-        observation.attemptedRecordIds.delete(key);
-        matched = true;
+        continue;
       }
+      observation.attemptedRecordIds.delete(key);
+      matched = true;
     }
     if (matched) {
       void this.requestReconciliation(observation);
@@ -559,11 +566,7 @@ export class ContextFollowing {
     for (const record of records) {
       const key = moduleContextKey(record.value.ownerDid, record.value.contextId);
       const previous = this._latestIntentRecords.get(key);
-      if (
-        previous === undefined
-        || record.timestamp > previous.timestamp
-        || (record.timestamp === previous.timestamp && record.id > previous.id)
-      ) {
+      if (previous === undefined || compareRecordsNewestFirst(record, previous) < 0) {
         this._latestIntentRecords.set(key, record);
         changed = true;
       }
