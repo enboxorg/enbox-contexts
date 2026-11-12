@@ -1,3 +1,5 @@
+import type { Enbox } from '@enbox/api';
+import { defineModule, recordCodecs } from '@enbox/api';
 import type {
   ContextRecordsApi,
   ContextRolePath,
@@ -176,4 +178,66 @@ export async function verifyBindContextsSurface(enbox: EnboxHost): Promise<void>
     const accepted = await inbox[0].accept();
     await accepted.refresh();
   }
+}
+
+const RealApiWorkspace = defineModule({
+  definition: {
+    module: 'https://example.com/modules/api-interop/workspace/v1',
+    published: true,
+    types: {
+      workspace: { dataFormats: ['application/json'] },
+      doc: { dataFormats: ['application/json'], encryptionRequired: true },
+      member: { dataFormats: ['application/json'] },
+    },
+    structure: {
+      workspace: {
+        $actions: [{ role: 'workspace/member', can: ['read'] }],
+        doc: {
+          $actions: [{ role: 'workspace/member', can: ['create', 'read', 'co-update'] }],
+        },
+        member: { $role: true },
+      },
+    },
+  },
+  codecs: {
+    workspace: recordCodecs.json<{ name: string }>(),
+    doc: recordCodecs.json<{ body: string }>(),
+    member: recordCodecs.json<{ handle: string }>(),
+  },
+});
+
+const RealApiComments = defineModule({
+  definition: {
+    module: 'https://example.com/modules/api-interop/comments/v1',
+    published: true,
+    uses: { ws: 'https://example.com/modules/api-interop/workspace/v1' },
+    types: {
+      comment: { dataFormats: ['application/json'], encryptionRequired: true },
+    },
+    structure: {
+      doc: {
+        $ref: 'ws:workspace/doc',
+        comment: {
+          $actions: [{ role: 'ws:workspace/member', can: ['create', 'read'] }],
+        },
+      },
+    },
+  },
+  codecs: {
+    comment: recordCodecs.json<{ text: string }>(),
+  },
+  dependencies: { ws: RealApiWorkspace },
+});
+
+export async function verifyPublishedEnboxApiInterop(enbox: Enbox): Promise<void> {
+  const hostCheck: EnboxHost = enbox;
+  void hostCheck;
+
+  const companion = defineContextModule(RealApiWorkspace);
+  const contexts = bindContexts(enbox, companion).withModules({ comments: RealApiComments });
+  const shared = await contexts.follow('workspace', { ownerDid: 'did:dht:owner', id: 'ws1' });
+  const comments = shared.using(RealApiComments);
+  const pathCheck: 'doc' = comments.path;
+  void pathCheck;
+  await comments.records.create('doc/comment', { parentContextId: 'ws1/doc1', data: { text: 'LGTM' } });
 }
