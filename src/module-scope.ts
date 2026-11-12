@@ -9,18 +9,38 @@ import type {
 import { compareCodeUnits, equalArrays } from './companion-module.js';
 
 /**
+ * Return the single non-role node in `graph` that represents `root` (either
+ * `root` itself or a top-level `$ref` attaching to `root` or beneath `root`),
+ * or `undefined` when zero or multiple nodes match.
+ */
+export function findModuleContextRoot(
+  graph: ResolvedModuleGraph,
+  root: ModuleContextRoot,
+): ResolvedModuleNode | undefined {
+  let matched: ResolvedModuleNode | undefined;
+  for (const node of graph.nodesByDeclaredPath.values()) {
+    if (node.ruleSet.$role === true || !isContextRootAttachment(node, root)) {
+      continue;
+    }
+    if (matched !== undefined) {
+      return undefined;
+    }
+    matched = node;
+  }
+  return matched;
+}
+
+/**
  * Find the node in `graph` that represents `root` — either the context root
  * record itself, or the single top-level `$ref` node that attaches directly to
  * `root` or to a descendant record beneath `root`.
  */
 export function resolveModuleContextRoot(graph: ResolvedModuleGraph, root: ModuleContextRoot): ResolvedModuleNode {
-  const matchingNodes = [...graph.nodesByDeclaredPath.values()].filter(
-    node => node.ruleSet.$role !== true && isContextRootAttachment(node, root),
-  );
-  if (matchingNodes.length !== 1) {
+  const matched = findModuleContextRoot(graph, root);
+  if (matched === undefined) {
     throw new TypeError(`Module '${graph.rootModuleUri}' must declare one exact shared root.`);
   }
-  return matchingNodes[0]!;
+  return matched;
 }
 
 /** Return direct `$role` child paths under `contextPath` that have `read` access to `contextPath`, in authored `$actions` order. */
@@ -138,7 +158,7 @@ function isRecordUnderContext(moduleUri: string, contextPath: string, path: stri
     && matchesSubtree(contextPath, path);
 }
 
-function matchesSubtree(prefix: string, candidate: string): boolean {
+export function matchesSubtree(prefix: string, candidate: string): boolean {
   return candidate === prefix || candidate.startsWith(`${prefix}/`);
 }
 
