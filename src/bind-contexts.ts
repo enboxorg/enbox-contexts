@@ -463,6 +463,13 @@ function createContextsInstance<
     }
     const allowedPaths = collectSubtreeRecordPaths(rootGraph, path, true);
     const roles = rolesForPath(path);
+    const execution = {
+      assertActive: async (): Promise<void> => {
+        enbox.signal.throwIfAborted();
+      },
+      contextId: id,
+      tenantDid: enbox.connectedDid,
+    };
     const base = {
       access: 'owner' as const,
       id,
@@ -473,6 +480,7 @@ function createContextsInstance<
         allowedPaths,
         contextId: id,
         contextPath: path,
+        execution,
         signal: enbox.signal,
       }) as ContextRecordsApi<D, C, Root>,
       rootRecordId: contextRootRecordId(id),
@@ -496,7 +504,7 @@ function createContextsInstance<
               recipient,
             });
           },
-          members: createMembersApi(enbox, rootTyped, id, roles),
+          members: createMembersApi(enbox, rootTyped, path, id, roles, execution),
         },
     ) as unknown as OwnedContext<D, C, Root>;
     boundOwners.set(key, owned as unknown as OwnedContext<D, C>);
@@ -975,8 +983,14 @@ function createMembersApi<
 >(
   enbox: EnboxHost,
   rootTyped: TypedEnboxHost,
+  contextPath: string,
   contextId: string,
   selectedRoles: readonly string[],
+  execution: {
+    assertActive(): Promise<void>;
+    contextId: string;
+    tenantDid: string;
+  },
 ): ContextMembersApi<D, C, ModulePaths<D> & string> {
   type RolePath = ModulePaths<D> & string;
   type ActiveMemberRecord = {
@@ -985,6 +999,13 @@ function createMembersApi<
     role: RolePath;
   };
   const rolePaths = [...selectedRoles] as RolePath[];
+  const roleRecords = rootTyped.scope({
+    allowedPaths: new Set(rolePaths),
+    contextId,
+    contextPath,
+    execution,
+    signal: enbox.signal,
+  }) as Pick<TypedEnboxHost<D, C>['records'], 'subscribe'>;
 
   const loadRole = async (role: RolePath, did?: string): Promise<ActiveMemberRecord[]> => {
     const rows: ActiveMemberRecord[] = [];
@@ -1109,7 +1130,7 @@ function createMembersApi<
             return { close: async (): Promise<void> => detachDelivery() };
           }
           try {
-            const sub = await rootTyped.records.subscribe(additionalRoles, { signal }, (event) => {
+            const sub = await roleRecords.subscribe(additionalRoles, { signal }, (event) => {
               if (event.type === 'error') {
                 fail(event.error);
               } else {

@@ -230,6 +230,9 @@ function createTestEnboxHost(connectedDid: string): {
   ensureReadyCalls: { module: string; path: string }[];
   followSourceCalls: { modules: readonly string[] }[];
   ensureModulesCalls: { modules: readonly string[] }[];
+  scopeCalls: { module: string; options: ScopedRecordsOptions }[];
+  scopedSubscribeCalls: { contextId: string; module: string; selection: string | readonly string[] }[];
+  unscopedSubscribeCalls: { module: string; selection: string | readonly string[] }[];
   resolveGraphOverride?: (source: FollowedSyncSource, moduleUri: string) => Promise<ResolvedModuleGraph>;
   emitSync(event: SyncEvent): void;
   abortSession(): void;
@@ -241,6 +244,9 @@ function createTestEnboxHost(connectedDid: string): {
   const ensureReadyCalls: { module: string; path: string }[] = [];
   const followSourceCalls: { modules: readonly string[] }[] = [];
   const ensureModulesCalls: { modules: readonly string[] }[] = [];
+  const scopeCalls: { module: string; options: ScopedRecordsOptions }[] = [];
+  const scopedSubscribeCalls: { contextId: string; module: string; selection: string | readonly string[] }[] = [];
+  const unscopedSubscribeCalls: { module: string; selection: string | readonly string[] }[] = [];
   let seq = 0;
 
   const state = {
@@ -249,6 +255,9 @@ function createTestEnboxHost(connectedDid: string): {
     ensureReadyCalls,
     followSourceCalls,
     ensureModulesCalls,
+    scopeCalls,
+    scopedSubscribeCalls,
+    unscopedSubscribeCalls,
     resolveGraphOverride: undefined as
       | ((source: FollowedSyncSource, moduleUri: string) => Promise<ResolvedModuleGraph>)
       | undefined,
@@ -405,7 +414,11 @@ function createTestEnboxHost(connectedDid: string): {
           rows.filter(r => r.module === mod.definition.module && r.modulePath === path).map(toRecord),
         ) as never;
       },
-      subscribe: async () => ({ close: async () => {} }),
+      subscribe: (async (...args: unknown[]) => {
+        const selection = args[0] as string | readonly string[];
+        scopedSubscribeCalls.push({ contextId: options.contextId, module: mod.definition.module, selection });
+        return { close: async () => {} };
+      }) as ContextRecordsApi['subscribe'],
       count: async (path) => {
         await checkPath(path);
         return rows.filter(r => r.module === mod.definition.module && r.modulePath === path).length;
@@ -536,7 +549,10 @@ function createTestEnboxHost(connectedDid: string): {
         ensureReady: async (path: string) => {
           ensureReadyCalls.push({ module: mod.definition.module, path });
         },
-        scope: options => makeScopeRecords(mod, options) as never,
+        scope: (options) => {
+          scopeCalls.push({ module: mod.definition.module, options });
+          return makeScopeRecords(mod, options) as never;
+        },
         records: {
           create: async (path, req) => {
             const id = `rec-${++seq}`;
@@ -584,7 +600,10 @@ function createTestEnboxHost(connectedDid: string): {
                 .map(toRecord),
             ) as never;
           },
-          subscribe: async () => ({ close: async () => {} }),
+          subscribe: async (selection: string | readonly string[]) => {
+            unscopedSubscribeCalls.push({ module: mod.definition.module, selection });
+            return { close: async () => {} };
+          },
           delete: async (_path, req) => {
             const idx = rows.findIndex(r => r.id === req.recordId);
             if (idx >= 0) {
@@ -855,5 +874,35 @@ describe('bindContexts & ContextFollowing end-to-end contracts', () => {
     expect(memberHost.followSourceCalls[0]?.modules).toEqual([DocCommentsModule.definition.module]);
     const memberComments = followed.using(DocCommentsModule);
     expect(memberComments.path).toBe('doc');
+  });
+
+  it('binds explicit execution context on OwnedContext.records and scopes additional-role member wake subscriptions', async () => {
+    const ownerHost = createTestEnboxHost(OWNER_DID);
+    const ownerContexts = bindContexts(ownerHost.enbox, NotebookContextsModule);
+    const owned = await ownerContexts.open('notebook/page', 'nb1/page1');
+
+    const rootScopes = ownerHost.scopeCalls.filter(call => call.module === NotebookModule.definition.module);
+    expect(rootScopes).toHaveLength(2);
+    for (const scopeCall of rootScopes) {
+      expect(scopeCall.options.contextId).toBe('nb1/page1');
+      expect(scopeCall.options.execution).toMatchObject({
+        contextId: 'nb1/page1',
+        tenantDid: OWNER_DID,
+      });
+    }
+
+    const memberView = await owned.members.observe();
+    try {
+      expect(ownerHost.scopedSubscribeCalls).toEqual([
+        {
+          contextId: 'nb1/page1',
+          module: NotebookModule.definition.module,
+          selection: ['notebook/page/viewer'],
+        },
+      ]);
+      expect(ownerHost.unscopedSubscribeCalls.filter(call => call.module === NotebookModule.definition.module)).toEqual([]);
+    } finally {
+      await memberView.close();
+    }
   });
 });
