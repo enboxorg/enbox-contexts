@@ -250,6 +250,41 @@ type MatchesAttachmentTarget<Target, ModuleUri extends string, ModulePath extend
       : [Target['path'] & ModulePath] extends [never] ? false : true
     : false;
 
+type ResolveAttachmentLineage<
+  M extends ModuleDependency,
+  Path extends string,
+  Seen extends string = never,
+> = string extends keyof M['definition']['structure'] ? AttachmentTarget
+  : string extends Path ? AttachmentTarget
+    : M['definition']['module'] extends Seen ? never
+      : RuleSetAtPath<M['definition']['structure'], Path> extends infer Node
+        ? [Node] extends [never] ? never
+          : Node extends { readonly $ref: infer Reference extends string }
+            ? string extends Reference ? AttachmentTarget
+              : Reference extends `${infer Alias}:${infer Target}`
+                ? Alias extends keyof M['dependencies']
+                  ? ResolveAttachmentLineage<
+                    M['dependencies'][Alias],
+                    Target,
+                    Seen | (string extends M['definition']['module'] ? never : M['definition']['module'])
+                  >
+                  : never
+                : never
+            : { module: M['definition']['module']; path: Path } | (
+              Path extends `${infer Parent}/${string}`
+                ? ResolveAttachmentLineage<M, Parent, Seen>
+                : never
+            )
+        : never;
+
+type IsStringUnion<Value extends string, Whole extends string = Value> =
+  Value extends unknown ? ([Whole] extends [Value] ? false : true) : false;
+
+type SingleAttachmentPath<Paths extends string> =
+  string extends Paths ? string
+    : [Paths] extends [never] ? never
+      : IsStringUnion<Paths> extends true ? never : Paths;
+
 export type ModuleAttachmentPaths<
   M extends TypedModule,
   OwningModuleUri extends string,
@@ -262,6 +297,20 @@ export type ModuleAttachmentPaths<
         : never
       : never;
 }[DeclaredPaths<M['definition']['structure']>];
+
+export type ModuleContextAttachmentPath<
+  M extends TypedModule,
+  OwningModuleUri extends string,
+  OwningContextRootPath extends string,
+> = string extends keyof M['definition']['structure'] ? string : SingleAttachmentPath<{
+  [Key in Extract<keyof M['definition']['structure'], string>]:
+    Key extends `$${string}` ? never
+      : M['definition']['structure'][Key] extends { readonly $ref: string }
+        ? true extends MatchesAttachmentTarget<ResolveAttachmentLineage<M, Key>, OwningModuleUri, OwningContextRootPath>
+          ? Key
+          : never
+        : never;
+}[Extract<keyof M['definition']['structure'], string>]>;
 
 type ResolvedRoleAtPath<
   D extends ModuleDefinition,
@@ -372,28 +421,32 @@ export type ContextRolePath<D extends ModuleDefinition> = {
 // Structural Resolved Graph & Sync Contracts
 // ---------------------------------------------------------------------------
 
-export type ResolvedRoleReference = Readonly<{
+export type ModuleContextRoot = Readonly<{
   owningModuleUri: string;
   owningModulePath: string;
 }>;
 
-export type ModuleContextRoot = Readonly<{
-  owningModuleUri: string;
-  owningModulePath: string;
+export type ResolvedRoleReference = ModuleContextRoot & Readonly<{
+  rawRole: string;
+  parentAncestor?: ModuleContextRoot;
+  ruleSet: ModuleRuleSet;
+}>;
+
+export type ResolvedModuleAction = Readonly<{
+  rule: ModuleActionRule;
+  resolvedRole?: ResolvedRoleReference;
 }>;
 
 export type ResolvedModuleNode = ModuleContextRoot & Readonly<{
   kind: 'record' | 'ref';
   declaringModuleUri: string;
   declaringModulePath: string;
-  physicalAncestors: readonly Readonly<{
-    owningModuleUri: string;
-    owningModulePath: string;
-  }>[];
+  physicalAncestors: readonly ModuleContextRoot[];
   physicalDepth: number;
   typeName: string;
   recordType: ModuleType;
   ruleSet: ModuleRuleSet;
+  actions: readonly ResolvedModuleAction[];
 }>;
 
 export type ResolvedModuleGraph = Readonly<{
@@ -404,7 +457,8 @@ export type ResolvedModuleGraph = Readonly<{
 
 export type ResolvedModuleRoleScope = Readonly<{
   contextPath: string;
-  readablePaths: readonly string[];
+  moduleRole: string;
+  readablePaths: readonly [string, ...string[]];
   allowedPaths: ReadonlySet<string>;
 }>;
 
@@ -928,20 +982,10 @@ export interface TypedEnboxHost<
   };
 }
 
-export interface EnboxModulesHost {
-  resolveGraph(module: TypedModule): ResolvedModuleGraph;
-  resolveContextRoles(graph: ResolvedModuleGraph, path: string): readonly string[];
-  resolveContextRoot(graph: ResolvedModuleGraph, root: ModuleContextRoot): ResolvedModuleNode;
-  resolveRoleScope(graph: ResolvedModuleGraph, role: ResolvedRoleReference): ResolvedModuleRoleScope;
-  definitionsEqual(left: unknown, right: unknown): boolean;
-  representationsEqual(expected: ResolvedModuleNode, actual: ResolvedModuleNode): boolean;
-}
-
 export interface EnboxHost {
   readonly connectedDid: string;
   readonly signal: AbortSignal;
   readonly dwn: HostDwnApi;
-  readonly modules: EnboxModulesHost;
   readonly agent: {
     readonly sync?: SyncEngineHost;
   };
@@ -1021,8 +1065,12 @@ export type ContextModuleBinding<
   OwningModulePath extends string = string,
 > = Readonly<{
   module: M['definition']['module'];
-  path: ModuleAttachmentPaths<M, OwningModuleUri, OwningModulePath>;
-  records: ContextRecordsApi<M['definition'], M['codecs'], ModuleAttachmentPaths<M, OwningModuleUri, OwningModulePath>>;
+  path: ModuleContextAttachmentPath<M, OwningModuleUri, OwningModulePath>;
+  records: ContextRecordsApi<
+    M['definition'],
+    M['codecs'],
+    ModuleContextAttachmentPath<M, OwningModuleUri, OwningModulePath>
+  >;
 }>;
 
 type ContextBase<

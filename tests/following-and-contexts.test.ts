@@ -119,6 +119,26 @@ function buildTestGraph(mod: TypedModule): ResolvedModuleGraph {
   }
   const nodes = new Map<string, ResolvedModuleNode>();
   const uri = mod.definition.module;
+  const resolveInvokedRole = (rolePath: string) => {
+    if (rolePath.includes(':')) {
+      const [alias, target] = rolePath.split(':') as [string, string];
+      const dep = mod.dependencies[alias]!;
+      const depRole = buildTestGraph(dep).resolveInvokedRole(target);
+      return {
+        ...depRole,
+        rawRole: rolePath,
+      };
+    }
+    const roleNode = nodes.get(rolePath);
+    const parentAncestor = roleNode?.physicalAncestors[roleNode.physicalAncestors.length - 1];
+    return {
+      owningModuleUri: uri,
+      owningModulePath: rolePath,
+      rawRole: rolePath,
+      parentAncestor,
+      ruleSet: roleNode?.ruleSet ?? { $role: true },
+    };
+  };
   const walk = (
     structure: Record<string, unknown>,
     prefix: string,
@@ -145,7 +165,8 @@ function buildTestGraph(mod: TypedModule): ResolvedModuleGraph {
           physicalDepth: targetNode.physicalDepth,
           typeName: key,
           recordType: {},
-          ruleSet,
+          ruleSet: targetNode.ruleSet,
+          actions: [],
         };
         nodes.set(declPath, attachNode);
         walk(ruleSet, declPath, [...targetNode.physicalAncestors, {
@@ -164,6 +185,7 @@ function buildTestGraph(mod: TypedModule): ResolvedModuleGraph {
           typeName: key,
           recordType: mod.definition.types[key] ?? {},
           ruleSet,
+          actions: [],
         };
         nodes.set(declPath, node);
         walk(ruleSet, declPath, [...ancestors, { owningModuleUri: uri, owningModulePath: declPath }]);
@@ -171,23 +193,20 @@ function buildTestGraph(mod: TypedModule): ResolvedModuleGraph {
     }
   };
   walk(mod.definition.structure, '', []);
+  for (const node of nodes.values()) {
+    if (node.kind !== 'record') {
+      continue;
+    }
+    const resolvedActions = (node.ruleSet.$actions ?? []).map(rule => ({
+      rule,
+      resolvedRole: rule.role === undefined ? undefined : resolveInvokedRole(rule.role),
+    }));
+    nodes.set(node.declaringModulePath, { ...node, actions: resolvedActions });
+  }
   const graph: ResolvedModuleGraph = {
     rootModuleUri: uri,
     nodesByDeclaredPath: nodes,
-    resolveInvokedRole: (rolePath: string) => {
-      if (rolePath.includes(':')) {
-        const [alias, target] = rolePath.split(':') as [string, string];
-        const dep = mod.dependencies[alias]!;
-        return {
-          owningModuleUri: dep.definition.module,
-          owningModulePath: target,
-        };
-      }
-      return {
-        owningModuleUri: uri,
-        owningModulePath: rolePath,
-      };
-    },
+    resolveInvokedRole,
   };
   testGraphs.set(mod, graph);
   return graph;
@@ -211,6 +230,9 @@ function createTestEnboxHost(connectedDid: string): {
   ensureReadyCalls: { module: string; path: string }[];
   followSourceCalls: { modules: readonly string[] }[];
   ensureModulesCalls: { modules: readonly string[] }[];
+  scopeCalls: { module: string; options: ScopedRecordsOptions }[];
+  scopedSubscribeCalls: { contextId: string; module: string; selection: string | readonly string[] }[];
+  unscopedSubscribeCalls: { module: string; selection: string | readonly string[] }[];
   resolveGraphOverride?: (source: FollowedSyncSource, moduleUri: string) => Promise<ResolvedModuleGraph>;
   emitSync(event: SyncEvent): void;
   abortSession(): void;
@@ -222,6 +244,9 @@ function createTestEnboxHost(connectedDid: string): {
   const ensureReadyCalls: { module: string; path: string }[] = [];
   const followSourceCalls: { modules: readonly string[] }[] = [];
   const ensureModulesCalls: { modules: readonly string[] }[] = [];
+  const scopeCalls: { module: string; options: ScopedRecordsOptions }[] = [];
+  const scopedSubscribeCalls: { contextId: string; module: string; selection: string | readonly string[] }[] = [];
+  const unscopedSubscribeCalls: { module: string; selection: string | readonly string[] }[] = [];
   let seq = 0;
 
   const state = {
@@ -230,6 +255,9 @@ function createTestEnboxHost(connectedDid: string): {
     ensureReadyCalls,
     followSourceCalls,
     ensureModulesCalls,
+    scopeCalls,
+    scopedSubscribeCalls,
+    unscopedSubscribeCalls,
     resolveGraphOverride: undefined as
       | ((source: FollowedSyncSource, moduleUri: string) => Promise<ResolvedModuleGraph>)
       | undefined,
@@ -386,7 +414,11 @@ function createTestEnboxHost(connectedDid: string): {
           rows.filter(r => r.module === mod.definition.module && r.modulePath === path).map(toRecord),
         ) as never;
       },
-      subscribe: async () => ({ close: async () => {} }),
+      subscribe: (async (...args: unknown[]) => {
+        const selection = args[0] as string | readonly string[];
+        scopedSubscribeCalls.push({ contextId: options.contextId, module: mod.definition.module, selection });
+        return { close: async () => {} };
+      }) as ContextRecordsApi['subscribe'],
       count: async (path) => {
         await checkPath(path);
         return rows.filter(r => r.module === mod.definition.module && r.modulePath === path).length;
@@ -496,76 +528,6 @@ function createTestEnboxHost(connectedDid: string): {
     signal: sessionController.signal,
     dwn,
     agent: { sync },
-    modules: {
-      resolveGraph: mod => buildTestGraph(mod),
-      resolveContextRoles: (graph, path) => {
-        const node = graph.nodesByDeclaredPath.get(path);
-        const actions = node?.ruleSet.$actions ?? [];
-        const directPrefix = `${path}/`;
-        return actions
-          .filter(
-            rule =>
-              typeof rule.role === 'string'
-              && rule.role.startsWith(directPrefix)
-              && !rule.role.slice(directPrefix.length).includes('/')
-              && rule.can.includes('read')
-              && graph.nodesByDeclaredPath.get(rule.role)?.ruleSet.$role === true,
-          )
-          .map(rule => rule.role!);
-      },
-      resolveContextRoot: (graph, root) => {
-        const matches = [...graph.nodesByDeclaredPath.values()].filter(
-          node =>
-            node.kind === 'ref'
-            && !node.declaringModulePath.includes('/')
-            && node.owningModuleUri === root.owningModuleUri
-            && node.owningModulePath === root.owningModulePath,
-        );
-        if (matches.length !== 1) {
-          throw new TypeError('Consumer module must declare one exact shared root attachment.');
-        }
-        return matches[0]!;
-      },
-      resolveRoleScope: (graph, roleRef) => {
-        const readable = new Set<string>();
-        const allowed = new Set<string>();
-        let contextPath: string | undefined;
-        for (const node of graph.nodesByDeclaredPath.values()) {
-          if (node.kind === 'ref') {
-            contextPath ??= node.declaringModulePath;
-            continue;
-          }
-          if (node.ruleSet.$role === true) {
-            continue;
-          }
-          for (const rule of node.ruleSet.$actions ?? []) {
-            if (typeof rule.role !== 'string') {
-              continue;
-            }
-            const resolved = graph.resolveInvokedRole(rule.role);
-            if (
-              resolved.owningModuleUri === roleRef.owningModuleUri
-              && resolved.owningModulePath === roleRef.owningModulePath
-            ) {
-              allowed.add(node.declaringModulePath);
-              if (rule.can.includes('read')) {
-                readable.add(node.declaringModulePath);
-              }
-            }
-          }
-        }
-        if (readable.size === 0) {
-          throw new TypeError('Invoked role grants no readable paths in this module.');
-        }
-        contextPath ??= roleRef.owningModulePath.split('/').slice(0, -1).join('/');
-        return { contextPath, readablePaths: [...readable], allowedPaths: allowed };
-      },
-      definitionsEqual: (a, b) => JSON.stringify(a) === JSON.stringify(b),
-      representationsEqual: (a, b) =>
-        a.owningModuleUri === b.owningModuleUri
-        && a.owningModulePath === b.owningModulePath
-        && JSON.stringify(a.recordType) === JSON.stringify(b.recordType),
-    },
     using: <D extends ModuleDefinition, C extends Record<string, RecordCodec<unknown>>>(
       mod: TypedModule<D, C>,
     ): TypedEnboxHost<D, C> => {
@@ -587,7 +549,10 @@ function createTestEnboxHost(connectedDid: string): {
         ensureReady: async (path: string) => {
           ensureReadyCalls.push({ module: mod.definition.module, path });
         },
-        scope: options => makeScopeRecords(mod, options) as never,
+        scope: (options) => {
+          scopeCalls.push({ module: mod.definition.module, options });
+          return makeScopeRecords(mod, options) as never;
+        },
         records: {
           create: async (path, req) => {
             const id = `rec-${++seq}`;
@@ -635,7 +600,10 @@ function createTestEnboxHost(connectedDid: string): {
                 .map(toRecord),
             ) as never;
           },
-          subscribe: async () => ({ close: async () => {} }),
+          subscribe: async (selection: string | readonly string[]) => {
+            unscopedSubscribeCalls.push({ module: mod.definition.module, selection });
+            return { close: async () => {} };
+          },
           delete: async (_path, req) => {
             const idx = rows.findIndex(r => r.id === req.recordId);
             if (idx >= 0) {
@@ -842,5 +810,99 @@ describe('bindContexts & ContextFollowing end-to-end contracts', () => {
     expect(mismatchErr).toBeInstanceOf(Error);
     expect(mismatchErr).not.toBeInstanceOf(ContextNotReadyError);
     expect((mismatchErr as Error).message).toContain('attachment path differs');
+  });
+
+  it('binds and follows a consumer module that attaches $ref to a descendant record beneath the shared root', async () => {
+    const SharedWorkspaceModule = makeModule(
+      {
+        module: 'https://example.com/modules/workspace/v1',
+        published: true,
+        types: {
+          workspace: { dataFormats: ['application/json'] },
+          member: { dataFormats: ['application/json'] },
+          doc: { dataFormats: ['application/json'], encryptionRequired: true },
+        },
+        structure: {
+          workspace: {
+            $actions: [{ role: 'workspace/member', can: ['read'] }],
+            member: { $role: true },
+            doc: { $actions: [{ role: 'workspace/member', can: ['create', 'read'] }] },
+          },
+        },
+      },
+      {
+        workspace: jsonCodec<{ name: string }>(),
+        member: jsonCodec<{ label: string }>(),
+        doc: jsonCodec<{ title: string }>(),
+      },
+    );
+    const DocCommentsModule = makeModule(
+      {
+        module: 'https://example.com/modules/workspace/comments/v1',
+        published: true,
+        uses: { ws: 'https://example.com/modules/workspace/v1' },
+        types: {
+          comment: { dataFormats: ['application/json'], encryptionRequired: true },
+        },
+        structure: {
+          doc: {
+            $ref: 'ws:workspace/doc',
+            comment: {
+              $actions: [{ role: 'ws:workspace/member', can: ['create', 'read'] }],
+            },
+          },
+        },
+      },
+      { comment: jsonCodec<{ body: string }>() },
+      { ws: SharedWorkspaceModule },
+    );
+    const WorkspaceContexts = defineContextModule(SharedWorkspaceModule);
+
+    const ownerHost = createTestEnboxHost(OWNER_DID);
+    const ownerContexts = bindContexts(ownerHost.enbox, WorkspaceContexts).withModules({ comments: DocCommentsModule });
+    const owned = await ownerContexts.open('workspace', 'ws1');
+    const ownerComments = owned.using(DocCommentsModule);
+    expect(ownerComments.path).toBe('doc');
+    await ownerComments.records.create('doc/comment', {
+      data: { body: 'Owner comment' },
+      parentContextId: 'ws1/doc1',
+    });
+
+    const memberHost = createTestEnboxHost(MEMBER_DID);
+    const memberContexts = bindContexts(memberHost.enbox, WorkspaceContexts).withModules({ comments: DocCommentsModule });
+    const followed = await memberContexts.follow('workspace', { ownerDid: OWNER_DID, id: 'ws1' });
+    expect(memberHost.followSourceCalls[0]?.modules).toEqual([DocCommentsModule.definition.module]);
+    const memberComments = followed.using(DocCommentsModule);
+    expect(memberComments.path).toBe('doc');
+  });
+
+  it('binds explicit execution context on OwnedContext.records and scopes additional-role member wake subscriptions', async () => {
+    const ownerHost = createTestEnboxHost(OWNER_DID);
+    const ownerContexts = bindContexts(ownerHost.enbox, NotebookContextsModule);
+    const owned = await ownerContexts.open('notebook/page', 'nb1/page1');
+
+    const rootScopes = ownerHost.scopeCalls.filter(call => call.module === NotebookModule.definition.module);
+    expect(rootScopes).toHaveLength(2);
+    for (const scopeCall of rootScopes) {
+      expect(scopeCall.options.contextId).toBe('nb1/page1');
+      expect(scopeCall.options.execution).toMatchObject({
+        contextId: 'nb1/page1',
+        tenantDid: OWNER_DID,
+      });
+    }
+
+    const memberView = await owned.members.observe();
+    try {
+      expect(ownerHost.scopedSubscribeCalls).toEqual([
+        {
+          contextId: 'nb1/page1',
+          module: NotebookModule.definition.module,
+          selection: ['notebook/page/viewer'],
+        },
+      ]);
+      expect(ownerHost.unscopedSubscribeCalls.filter(call => call.module === NotebookModule.definition.module)).toEqual([]);
+    } finally {
+      await memberView.close();
+    }
   });
 });

@@ -22,6 +22,7 @@ import type {
   ContextsApi,
   EnboxHost,
   ExpandableRecordView,
+  FollowedModuleScope,
   FollowedSyncSource,
   MemberContext,
   ModuleContext,
@@ -34,7 +35,9 @@ import type {
   ResolvedModuleGraph,
   ResolvedModuleNode,
   ResolvedModuleRoleScope,
+  ResolvedRoleReference,
   RoleDeliveryState,
+  SyncEngineHost,
   TypedEnboxHost,
   TypedModule,
 } from './host-types.js';
@@ -65,6 +68,14 @@ import {
 } from './errors.js';
 import { ContextFollowing } from './following.js';
 import { FollowedModuleLease, followedSyncSourceActiveEqual } from './lease.js';
+import {
+  findModuleContextRoot,
+  matchesSubtree,
+  recordRepresentationsEqual,
+  resolveModuleContextRoles,
+  resolveModuleContextRoot,
+  resolveModuleRoleScope,
+} from './module-scope.js';
 import { ObservedView, openView, toRecordViewErrorState, whileSignalsActive } from './observed-view.js';
 import { createProjectedRecordView } from './projected-record-view.js';
 
@@ -163,25 +174,27 @@ function createContextsInstance<
   const rootModuleUri = rootModule.definition.module;
   const companionModuleUri = companionModule.definition.module;
 
+  const contextRolesByPath = new Map<string, readonly string[]>();
+  const rolesForPath = (path: string): readonly string[] => {
+    const cached = contextRolesByPath.get(path);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const resolved = getContextRoles(rootGraph, path);
+    contextRolesByPath.set(path, resolved);
+    return resolved;
+  };
+
   const contextRoots = [...rootGraph.nodesByDeclaredPath.values()]
     .filter(node => node.kind === 'record' && node.ruleSet.$role !== true && node.owningModuleUri === rootModuleUri)
     .map(node => node.declaringModulePath)
-    .filter(path => getContextRoles(enbox, rootGraph, path).length > 0);
+    .filter(path => rolesForPath(path).length > 0);
 
-  const hasContextModuleAttachment = (consumerGraph: ResolvedModuleGraph, root: ResolvedModuleNode): boolean => {
-    if (root.kind !== 'record' || root.ruleSet.$role === true || root.owningModuleUri !== rootModuleUri) {
-      return false;
-    }
-    try {
-      enbox.modules.resolveContextRoot(consumerGraph, root);
-      return true;
-    } catch (error: unknown) {
-      if (error instanceof TypeError) {
-        return false;
-      }
-      throw error;
-    }
-  };
+  const hasContextModuleAttachment = (consumerGraph: ResolvedModuleGraph, root: ResolvedModuleNode): boolean =>
+    root.kind === 'record'
+    && root.ruleSet.$role !== true
+    && root.owningModuleUri === rootModuleUri
+    && findModuleContextRoot(consumerGraph, root) !== undefined;
 
   const attachesToAnyRoot = (consumerGraph: ResolvedModuleGraph): boolean => {
     for (const root of rootGraph.nodesByDeclaredPath.values()) {
@@ -202,7 +215,7 @@ function createContextsInstance<
     const modules = root?.kind === 'record'
       ? Object.freeze(
         Object.values(selectedModules)
-          .filter(module => hasContextModuleAttachment(enbox.modules.resolveGraph(module), root))
+          .filter(module => hasContextModuleAttachment(enbox.using(module).graph, root))
           .map(module => module.definition.module),
       )
       : Object.freeze([]);
@@ -243,7 +256,6 @@ function createContextsInstance<
       companionModuleUri,
       rootModuleUri,
       rootGraph,
-      modulesHost: enbox.modules,
       signal: enbox.signal,
       sync,
       append: async (intent: ContextFollowIntent, after?: string): Promise<ContextFollowRecord> => {
@@ -321,14 +333,15 @@ function createContextsInstance<
         return existing;
       }
 
-      const consumerGraph = enbox.modules.resolveGraph(consumerModule);
-      const rootNode = resolveRecordNode(rootGraph, rootPath);
-      const attachment = enbox.modules.resolveContextRoot(consumerGraph, rootNode);
-      const attachmentPath = attachment.declaringModulePath;
       const consumerTyped = enbox.using(consumerModule);
+      const consumerGraph = consumerTyped.graph;
+      const rootNode = resolveRecordNode(rootGraph, rootPath);
+      const attachment = resolveModuleContextRoot(consumerGraph, rootNode);
+      const attachmentPath = attachment.declaringModulePath;
       const staticConsumerPaths = collectSubtreeRecordPaths(consumerGraph, attachmentPath, false);
 
       let innerRecords: ContextModuleBinding['records'];
+      let publicRecords: ContextModuleBinding['records'];
       let bindingSignal = contextSignal;
 
       if (source === undefined) {
@@ -351,6 +364,7 @@ function createContextsInstance<
           },
           signal: contextSignal,
         }) as unknown as ContextModuleBinding['records'];
+        publicRecords = innerRecords;
       } else {
         const sync = enbox.agent.sync!;
         const rootRoleRef = rootGraph.resolveInvokedRole(source.modules[source.rootModule]!.moduleRole);
@@ -359,7 +373,7 @@ function createContextsInstance<
         // and operations reject with ContextNotReadyError unless the role/scope changes.
         let initialScope: ResolvedModuleRoleScope | undefined;
         try {
-          initialScope = enbox.modules.resolveRoleScope(consumerGraph, rootRoleRef);
+          initialScope = resolveModuleRoleScope(consumerGraph, rootRoleRef);
         } catch (error: unknown) {
           if (!(error instanceof TypeError)) {
             throw error;
@@ -377,58 +391,16 @@ function createContextsInstance<
           signal: contextSignal,
           sync,
           onCapture: async (accepted, verifiedSource): Promise<void> => {
-            // Attachment mismatch is a terminal contract mismatch, not transient readiness.
-            if (accepted.contextPath !== attachmentPath) {
-              throw new Error('Context.using: verified consumer attachment path differs from the typed context binding.');
-            }
-            let actualGraph: ResolvedModuleGraph;
-            try {
-              actualGraph = await sync.resolveFollowedSourceModuleGraph(
-                verifiedSource,
-                consumerModule.definition.module,
-              );
-            } catch (error: unknown) {
-              if (isFollowedSourceNotReadyError(error)) {
-                throw new ContextNotReadyError(error);
-              }
-              throw error;
-            }
-            if (actualGraph.rootModuleUri !== consumerModule.definition.module) {
-              throw new Error('Context.using: verified context graph belongs to a different module.');
-            }
-            const actualRole = actualGraph.resolveInvokedRole(accepted.moduleRole);
-            if (
-              actualRole.owningModuleUri !== rootRoleRef.owningModuleUri
-              || actualRole.owningModulePath !== rootRoleRef.owningModulePath
-            ) {
-              throw new Error('Context.using: verified consumer role no longer identifies the accepted root membership.');
-            }
-            if (initialScope === undefined) {
-              throw new ContextNotReadyError(
-                new Error(`Role '${accepted.moduleRole}' has no readable paths in '${consumerModule.definition.module}'.`),
-              );
-            }
-            const actualScope = enbox.modules.resolveRoleScope(actualGraph, rootRoleRef);
-            const actualAllowed = new Set(actualScope.allowedPaths);
-            const acceptedPaths = new Set(accepted.modulePaths);
-            const readable = new Set(actualScope.readablePaths);
-            const permitted = [...initialScope.allowedPaths].filter(
-              path => actualAllowed.has(path) && (!readable.has(path) || acceptedPaths.has(path)),
-            );
-            for (const path of permitted) {
-              const actualNode = actualGraph.nodesByDeclaredPath.get(path);
-              const expectedNode = consumerGraph.nodesByDeclaredPath.get(path);
-              if (
-                actualNode?.kind !== 'record'
-                || expectedNode?.kind !== 'record'
-                || !enbox.modules.representationsEqual(expectedNode, actualNode)
-              ) {
-                throw new Error(
-                  `Context.using: owner module '${consumerModule.definition.module}' changed the consumed representation at '${path}'.`,
-                );
-              }
-            }
-            permittedPaths = new Set(permitted);
+            permittedPaths = await verifyMemberConsumerCapture({
+              accepted,
+              attachmentPath,
+              consumerGraph,
+              consumerModuleUri: consumerModule.definition.module,
+              initialScope,
+              rootRoleRef,
+              sync,
+              verifiedSource,
+            });
           },
         });
 
@@ -443,47 +415,26 @@ function createContextsInstance<
           },
           signal: bindingSignal,
         }) as unknown as ContextModuleBinding['records'];
-      }
 
-      let publicRecords = innerRecords;
-      if (source !== undefined) {
-        const observe = (async (
-          rawPath: string,
-          request: ContextObserveRequest<ModuleDefinition, string>,
-        ): Promise<ExpandableRecordView<unknown>> => {
-          enbox.signal.throwIfAborted();
-          bindingSignal.throwIfAborted();
-          request?.signal?.throwIfAborted();
-          const path = normalizePath(rawPath);
-          if (!staticConsumerPaths.has(path)) {
-            throw new TypeError(`Context-bound records do not expose path '${path}'.`);
-          }
-          const limit = request?.pagination?.limit;
-          if (typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit <= 0) {
-            throw new TypeError('records.observe: pagination.limit must be a positive safe integer.');
-          }
-          if (request.within !== undefined) {
-            if (!isValidContextId(request.within) || (request.within !== contextId && !request.within.startsWith(`${contextId}/`))) {
-              throw new TypeError('Context-bound selectors cannot escape their context.');
-            }
-          }
-          return createProjectedRecordView({
-            callerSignal: request.signal,
-            module: consumerModule.definition.module,
-            signal: contextSignal,
-            source,
-            root: rootLease!,
-            sync: enbox.agent.sync!,
-            generation: (): ProjectionViewGeneration<unknown> => {
-              const current = getBinding(consumerModule);
-              return {
-                signal: current.signal,
-                open: (viewSignal: AbortSignal): Promise<ExpandableRecordView<unknown>> =>
-                  current.innerRecords.observe(path, { ...request, signal: viewSignal }),
-              };
-            },
-          });
-        }) as typeof innerRecords.observe;
+        const observe = createProjectedConsumerObserve({
+          bindingSignal,
+          consumerModuleUri: consumerModule.definition.module,
+          contextId,
+          contextSignal,
+          enboxSignal: enbox.signal,
+          getGeneration: (path, request) => (): ProjectionViewGeneration<unknown> => {
+            const current = getBinding(consumerModule);
+            return {
+              signal: current.signal,
+              open: (viewSignal: AbortSignal): Promise<ExpandableRecordView<unknown>> =>
+                current.innerRecords.observe(path, { ...request, signal: viewSignal }),
+            };
+          },
+          rootLease: rootLease!,
+          source,
+          staticConsumerPaths,
+          sync,
+        });
         publicRecords = Object.freeze({ ...innerRecords, observe });
       }
 
@@ -511,7 +462,14 @@ function createContextsInstance<
       return existing as unknown as OwnedContext<D, C, Root>;
     }
     const allowedPaths = collectSubtreeRecordPaths(rootGraph, path, true);
-    const roles = getContextRoles(enbox, rootGraph, path);
+    const roles = rolesForPath(path);
+    const execution = {
+      assertActive: async (): Promise<void> => {
+        enbox.signal.throwIfAborted();
+      },
+      contextId: id,
+      tenantDid: enbox.connectedDid,
+    };
     const base = {
       access: 'owner' as const,
       id,
@@ -522,6 +480,7 @@ function createContextsInstance<
         allowedPaths,
         contextId: id,
         contextPath: path,
+        execution,
         signal: enbox.signal,
       }) as ContextRecordsApi<D, C, Root>,
       rootRecordId: contextRootRecordId(id),
@@ -545,7 +504,7 @@ function createContextsInstance<
               recipient,
             });
           },
-          members: createMembersApi(enbox, rootTyped, id, roles),
+          members: createMembersApi(enbox, rootTyped, path, id, roles, execution),
         },
     ) as unknown as OwnedContext<D, C, Root>;
     boundOwners.set(key, owned as unknown as OwnedContext<D, C>);
@@ -563,12 +522,8 @@ function createContextsInstance<
       throw new Error('ContextsApi requires an Enbox session with sync storage.');
     }
     const rootScope = source.modules[source.rootModule]!;
-    const scope = enbox.modules.resolveRoleScope(rootGraph, rootGraph.resolveInvokedRole(rootScope.moduleRole));
-    const replicatedPaths = new Set(rootScope.modulePaths);
-    const readablePaths = new Set(scope.readablePaths);
-    const allowedPaths = new Set(
-      [...scope.allowedPaths].filter(path => !readablePaths.has(path) || replicatedPaths.has(path)),
-    );
+    const scope = resolveModuleRoleScope(rootGraph, rootGraph.resolveInvokedRole(rootScope.moduleRole));
+    const allowedPaths = filterReplicatedRolePaths(scope, rootScope.modulePaths);
 
     const lease = new FollowedModuleLease({
       module: rootModuleUri,
@@ -701,7 +656,7 @@ function createContextsInstance<
     enbox.signal.throwIfAborted();
     const path = normalizePath(rawPath);
     const target = normalizeFollowTarget(request, 'ContextsApi.follow');
-    if (getContextRoles(enbox, rootGraph, path).length === 0) {
+    if (rolesForPath(path).length === 0) {
       throw new TypeError(`ContextsApi.follow: '${path}' is not a shared context root.`);
     }
     let source: FollowedSyncSource;
@@ -792,11 +747,11 @@ function createContextsInstance<
       if (!isTypedModuleLike(candidate)) {
         throw new TypeError(`ContextsApi.withModules: '${name}' is not a TypedModule.`);
       }
-      const graph = enbox.modules.resolveGraph(candidate);
       if (candidate.definition.module === rootModuleUri || uris.has(candidate.definition.module)) {
         throw new TypeError('ContextsApi.withModules requires distinct consumer module URIs.');
       }
       uris.add(candidate.definition.module);
+      const graph = enbox.using(candidate).graph;
       if (!attachesToAnyRoot(graph)) {
         throw new TypeError(
           `ContextsApi.withModules: '${candidate.definition.module}' does not attach to an owned root of '${rootModuleUri}'.`,
@@ -868,7 +823,7 @@ function createContextsInstance<
       const rootNode = rootGraph.nodesByDeclaredPath.get(envelope.path);
       if (
         rootNode?.kind !== 'record'
-        || getContextRoles(enbox, rootGraph, envelope.path).length === 0
+        || rolesForPath(envelope.path).length === 0
         || !isValidContextId(envelope.contextId)
         || envelope.contextId.split('/').length !== rootNode.physicalDepth
       ) {
@@ -1028,8 +983,14 @@ function createMembersApi<
 >(
   enbox: EnboxHost,
   rootTyped: TypedEnboxHost,
+  contextPath: string,
   contextId: string,
   selectedRoles: readonly string[],
+  execution: {
+    assertActive(): Promise<void>;
+    contextId: string;
+    tenantDid: string;
+  },
 ): ContextMembersApi<D, C, ModulePaths<D> & string> {
   type RolePath = ModulePaths<D> & string;
   type ActiveMemberRecord = {
@@ -1038,6 +999,13 @@ function createMembersApi<
     role: RolePath;
   };
   const rolePaths = [...selectedRoles] as RolePath[];
+  const roleRecords = rootTyped.scope({
+    allowedPaths: new Set(rolePaths),
+    contextId,
+    contextPath,
+    execution,
+    signal: enbox.signal,
+  }) as Pick<TypedEnboxHost<D, C>['records'], 'subscribe'>;
 
   const loadRole = async (role: RolePath, did?: string): Promise<ActiveMemberRecord[]> => {
     const rows: ActiveMemberRecord[] = [];
@@ -1059,6 +1027,7 @@ function createMembersApi<
     return perRole.flat();
   };
 
+  const rolePrecedence = new Map(rolePaths.map((role, index) => [role, index]));
   const prefer = (
     current: ActiveMemberRecord | undefined,
     candidate: ActiveMemberRecord,
@@ -1066,7 +1035,7 @@ function createMembersApi<
     if (current === undefined) {
       return candidate;
     }
-    const precedence = rolePaths.indexOf(candidate.role) - rolePaths.indexOf(current.role);
+    const precedence = (rolePrecedence.get(candidate.role) ?? -1) - (rolePrecedence.get(current.role) ?? -1);
     if (precedence !== 0) {
       return precedence < 0 ? candidate : current;
     }
@@ -1161,7 +1130,7 @@ function createMembersApi<
             return { close: async (): Promise<void> => detachDelivery() };
           }
           try {
-            const sub = await rootTyped.records.subscribe(additionalRoles, { signal }, (event) => {
+            const sub = await roleRecords.subscribe(additionalRoles, { signal }, (event) => {
               if (event.type === 'error') {
                 fail(event.error);
               } else {
@@ -1377,6 +1346,141 @@ class MappedRecordView<Raw, Projected> extends ObservedView<RecordViewState<Proj
   }
 }
 
+function filterReplicatedRolePaths(
+  scope: ResolvedModuleRoleScope,
+  replicatedModulePaths: readonly string[],
+): Set<string> {
+  const replicated = new Set(replicatedModulePaths);
+  const readable = new Set(scope.readablePaths);
+  return new Set(
+    [...scope.allowedPaths].filter(path => !readable.has(path) || replicated.has(path)),
+  );
+}
+
+async function verifyMemberConsumerCapture(options: {
+  accepted: FollowedModuleScope;
+  attachmentPath: string;
+  consumerGraph: ResolvedModuleGraph;
+  consumerModuleUri: string;
+  initialScope: ResolvedModuleRoleScope | undefined;
+  rootRoleRef: ResolvedRoleReference;
+  sync: SyncEngineHost;
+  verifiedSource: FollowedSyncSource;
+}): Promise<ReadonlySet<string>> {
+  const {
+    accepted,
+    attachmentPath,
+    consumerGraph,
+    consumerModuleUri,
+    initialScope,
+    rootRoleRef,
+    sync,
+    verifiedSource,
+  } = options;
+  // Attachment mismatch is a terminal contract mismatch, not transient readiness.
+  if (accepted.contextPath !== attachmentPath) {
+    throw new Error('Context.using: verified consumer attachment path differs from the typed context binding.');
+  }
+  let actualGraph: ResolvedModuleGraph;
+  try {
+    actualGraph = await sync.resolveFollowedSourceModuleGraph(verifiedSource, consumerModuleUri);
+  } catch (error: unknown) {
+    if (isFollowedSourceNotReadyError(error)) {
+      throw new ContextNotReadyError(error);
+    }
+    throw error;
+  }
+  if (actualGraph.rootModuleUri !== consumerModuleUri) {
+    throw new Error('Context.using: verified context graph belongs to a different module.');
+  }
+  const actualRole = actualGraph.resolveInvokedRole(accepted.moduleRole);
+  if (
+    actualRole.owningModuleUri !== rootRoleRef.owningModuleUri
+    || actualRole.owningModulePath !== rootRoleRef.owningModulePath
+  ) {
+    throw new Error('Context.using: verified consumer role no longer identifies the accepted root membership.');
+  }
+  if (initialScope === undefined) {
+    throw new ContextNotReadyError(
+      new Error(`Role '${accepted.moduleRole}' has no readable paths in '${consumerModuleUri}'.`),
+    );
+  }
+  const actualScope = resolveModuleRoleScope(actualGraph, rootRoleRef);
+  const actualPermitted = filterReplicatedRolePaths(actualScope, accepted.modulePaths);
+  const permitted = [...initialScope.allowedPaths].filter(path => actualPermitted.has(path));
+  for (const path of permitted) {
+    const actualNode = actualGraph.nodesByDeclaredPath.get(path);
+    const expectedNode = consumerGraph.nodesByDeclaredPath.get(path);
+    if (
+      actualNode?.kind !== 'record'
+      || expectedNode?.kind !== 'record'
+      || !recordRepresentationsEqual(expectedNode, actualNode)
+    ) {
+      throw new Error(
+        `Context.using: owner module '${consumerModuleUri}' changed the consumed representation at '${path}'.`,
+      );
+    }
+  }
+  return new Set(permitted);
+}
+
+function createProjectedConsumerObserve(options: {
+  bindingSignal: AbortSignal;
+  consumerModuleUri: string;
+  contextId: string;
+  contextSignal: AbortSignal;
+  enboxSignal: AbortSignal;
+  getGeneration: (
+    path: string,
+    request: ContextObserveRequest<ModuleDefinition, string>,
+  ) => () => ProjectionViewGeneration<unknown>;
+  rootLease: FollowedModuleLease;
+  source: FollowedSyncSource;
+  staticConsumerPaths: ReadonlySet<string>;
+  sync: SyncEngineHost;
+}): ContextModuleBinding['records']['observe'] {
+  const {
+    bindingSignal,
+    consumerModuleUri,
+    contextId,
+    contextSignal,
+    enboxSignal,
+    getGeneration,
+    rootLease,
+    source,
+    staticConsumerPaths,
+    sync,
+  } = options;
+  return (async (
+    rawPath: string,
+    request: ContextObserveRequest<ModuleDefinition, string>,
+  ): Promise<ExpandableRecordView<unknown>> => {
+    enboxSignal.throwIfAborted();
+    bindingSignal.throwIfAborted();
+    request?.signal?.throwIfAborted();
+    const path = normalizePath(rawPath);
+    if (!staticConsumerPaths.has(path)) {
+      throw new TypeError(`Context-bound records do not expose path '${path}'.`);
+    }
+    const limit = request?.pagination?.limit;
+    if (typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit <= 0) {
+      throw new TypeError('records.observe: pagination.limit must be a positive safe integer.');
+    }
+    if (request.within !== undefined && (!isValidContextId(request.within) || !matchesSubtree(contextId, request.within))) {
+      throw new TypeError('Context-bound selectors cannot escape their context.');
+    }
+    return createProjectedRecordView({
+      callerSignal: request.signal,
+      module: consumerModuleUri,
+      signal: contextSignal,
+      source,
+      root: rootLease,
+      sync,
+      generation: getGeneration(path, request),
+    });
+  }) as ContextModuleBinding['records']['observe'];
+}
+
 function collectSubtreeRecordPaths(
   graph: ResolvedModuleGraph,
   rootPath: string,
@@ -1389,14 +1493,13 @@ function collectSubtreeRecordPaths(
         node =>
           node.kind === 'record'
           && node.ruleSet.$role !== true
-          && ((includeRoot && node.declaringModulePath === rootPath) || node.declaringModulePath.startsWith(prefix)),
+          && (includeRoot ? matchesSubtree(rootPath, node.declaringModulePath) : node.declaringModulePath.startsWith(prefix)),
       )
       .map(node => node.declaringModulePath),
   );
 }
 
 function getContextRoles(
-  enbox: EnboxHost,
   rootGraph: ResolvedModuleGraph,
   path: string,
 ): readonly string[] {
@@ -1409,7 +1512,7 @@ function getContextRoles(
   ) {
     return [];
   }
-  return enbox.modules.resolveContextRoles(rootGraph, path);
+  return resolveModuleContextRoles(rootGraph, path);
 }
 
 function resolveRecordNode(graph: ResolvedModuleGraph, path: string): ResolvedModuleNode {
